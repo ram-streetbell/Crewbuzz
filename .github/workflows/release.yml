@@ -29,10 +29,13 @@ jobs:
       - name: Build release APK
         run: gradle :app:assembleRelease --no-daemon
 
-      - name: Verify APK
+      - name: Locate and verify APK
         run: |
-          test -f app/build/outputs/apk/release/app-release.apk
-          ls -lh app/build/outputs/apk/release/app-release.apk
+          find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print
+          APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          ls -lh "$APK"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -40,5 +43,4 @@ jobs:
           tag_name: v${{ github.run_number }}
           name: CrewBuzz v${{ github.run_number }}
           generate_release_notes: true
-          files: |
-            app/build/outputs/apk/release/app-release.apk
+          files: ${{ env.APK_PATH }}

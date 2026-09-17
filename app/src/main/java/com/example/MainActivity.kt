@@ -6,7 +6,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,138 +25,46 @@ private val Red = Color(0xFFDC2626)
 private val Green = Color(0xFF16A34A)
 private val Slate = Color(0xFF0F172A)
 private val Muted = Color(0xFF64748B)
-private data class Call(val id: Int, val table: String, val type: String, val created: Long, val attended: Long? = null, val staff: String? = null)
-private data class Device(val id: String, val name: String, val table: String, val online: Boolean = true, val battery: Int = 100)
-private data class AppState(val calls: List<Call>, val history: List<Call>, val devices: List<Device>)
+private data class Call(val id:Int,val table:String,val type:String,val created:Long,val attended:Long?=null,val staff:String?=null)
+private data class Device(val id:String,val name:String,val table:String,val online:Boolean=true,val battery:Int=100)
+private data class AppState(val calls:List<Call>,val history:List<Call>,val devices:List<Device>)
 
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent { CrewBuzzApp() }
+class MainActivity:ComponentActivity(){
+    override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);enableEdgeToEdge();setContent{CrewBuzzApp()}}
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun CrewBuzzApp(){
+    var loggedIn by remember{mutableStateOf(false)}
+    var staff by remember{mutableStateOf("")}
+    var page by remember{mutableIntStateOf(0)}
+    var nextId by remember{mutableIntStateOf(10)}
+    var state by remember{mutableStateOf(AppState(
+        listOf(Call(1,"Table 1","SERVICE",System.currentTimeMillis()-120000),Call(2,"Table 3","BILL",System.currentTimeMillis()-340000),Call(3,"VIP B","WATER",System.currentTimeMillis()-40000)),
+        listOf(Call(4,"Table 2","SERVICE",System.currentTimeMillis()-1800000,System.currentTimeMillis()-1650000,"Jack W."),Call(5,"Bar 1","BILL",System.currentTimeMillis()-3600000,System.currentTimeMillis()-3400000,"Emily R.")),
+        listOf(Device("DEV-001","Table 1 Call Bell","Table 1",true,96),Device("DEV-002","Table 2 Call Bell","Table 2",true,88),Device("DEV-003","Table 3 Call Bell","Table 3",true,92),Device("DEV-004","Table 4 Call Bell","Table 12",true,45),Device("DEV-005","VIP Booth A Pager","VIP A",true,100),Device("DEV-006","VIP Booth B Pager","VIP B",true,98),Device("DEV-007","Bar Counter 1 Button","Bar 1",true,75),Device("DEV-008","Kitchen Order Alert","Kitchen",false,0))
+    ))
+    MaterialTheme(colorScheme=lightColorScheme(primary=Red,background=Color(0xFFFDFDFD),surface=Color.White)){
+        if(!loggedIn) LoginScreen{staff=it;loggedIn=true} else Scaffold(
+            topBar={TopAppBar(title={Text("CrewBuzz",fontWeight=FontWeight.Black,color=Red)},actions={Text(staff,color=Red,fontWeight=FontWeight.Bold);Spacer(Modifier.width(16.dp))})},
+            bottomBar={NavigationBar{listOf("Dashboard","Devices","History","Settings").forEachIndexed{i,label->NavigationBarItem(selected=page==i,onClick={page=i},icon={Icon(if(i==0)Icons.Default.Dashboard else if(i==1)Icons.Default.Router else if(i==2)Icons.Default.History else Icons.Default.Settings,label)},label={Text(label)})}}}
+        ){pad->Box(Modifier.padding(pad).fillMaxSize().background(Color(0xFFFDFDFD))){when(page){
+            0->Dashboard(state,{table,type->state=state.copy(calls=state.calls+Call(nextId++,table,type,System.currentTimeMillis()))}){id->state.calls.firstOrNull{it.id==id}?.let{c->state=state.copy(calls=state.calls.filterNot{it.id==id},history=listOf(c.copy(attended=System.currentTimeMillis(),staff=staff))+state.history)}}
+            1->Devices(state,{id->state=state.copy(devices=state.devices.map{if(it.id==id)it.copy(online=!it.online)else it})},{id,name,table->state=state.copy(devices=state.devices+Device(id.ifBlank{"DEV-${state.devices.size+1}"},name.ifBlank{"$table Call Bell"},table.ifBlank{"Table ${state.devices.size+1}"}))},{id->state=state.copy(devices=state.devices.filterNot{it.id==id})})
+            2->History(state.history){state=state.copy(history=emptyList())}
+            else->Settings(staff,{state=state.copy(calls=emptyList())}){loggedIn=false;staff="";page=0}
+        }}}
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun CrewBuzzApp() {
-    var loggedIn by remember { mutableStateOf(false) }
-    var staff by remember { mutableStateOf("") }
-    var page by remember { mutableStateOf(0) }
-    var nextId by remember { mutableIntStateOf(10) }
-    var state by remember {
-        mutableStateOf(AppState(
-            calls = listOf(
-                Call(1, "Table 1", "SERVICE", System.currentTimeMillis() - 120000),
-                Call(2, "Table 3", "BILL", System.currentTimeMillis() - 340000),
-                Call(3, "VIP B", "WATER", System.currentTimeMillis() - 40000)
-            ),
-            history = listOf(
-                Call(4, "Table 2", "SERVICE", System.currentTimeMillis() - 1800000, System.currentTimeMillis() - 1650000, "Jack W."),
-                Call(5, "Bar 1", "BILL", System.currentTimeMillis() - 3600000, System.currentTimeMillis() - 3400000, "Emily R.")
-            ),
-            devices = listOf(
-                Device("DEV-001", "Table 1 Call Bell", "Table 1", true, 96),
-                Device("DEV-002", "Table 2 Call Bell", "Table 2", true, 88),
-                Device("DEV-003", "Table 3 Call Bell", "Table 3", true, 92),
-                Device("DEV-004", "Table 4 Call Bell", "Table 12", true, 45),
-                Device("DEV-005", "VIP Booth A Pager", "VIP A", true, 100),
-                Device("DEV-006", "VIP Booth B Pager", "VIP B", true, 98),
-                Device("DEV-007", "Bar Counter 1 Button", "Bar 1", true, 75),
-                Device("DEV-008", "Kitchen Order Alert", "Kitchen", false, 0)
-            )
-        ))
-    }
+@Composable private fun LoginScreen(onLogin:(String)->Unit){var name by remember{mutableStateOf("")};var pin by remember{mutableStateOf("")};var error by remember{mutableStateOf("")};Box(Modifier.fillMaxSize().background(Color(0xFFFDFDFD)),Alignment.Center){Card(Modifier.fillMaxWidth().padding(24.dp),shape=RoundedCornerShape(24.dp)){Column(Modifier.padding(32.dp),horizontalAlignment=Alignment.CenterHorizontally){Icon(Icons.Default.Restaurant,null,tint=Red,modifier=Modifier.size(48.dp));Spacer(Modifier.height(16.dp));Text("CrewBuzz Terminal",fontSize=24.sp,fontWeight=FontWeight.Black);Text("Waitstaff paging dashboard receiver unit",color=Muted,fontSize=12.sp);Spacer(Modifier.height(24.dp));OutlinedTextField(name,{name=it},label={Text("Waiter Name / ID")},singleLine=true,modifier=Modifier.fillMaxWidth());Spacer(Modifier.height(12.dp));OutlinedTextField(pin,{if(it.length<=4)pin=it},label={Text("Station PIN Code")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth());if(error.isNotEmpty())Text(error,color=Red,fontSize=12.sp,modifier=Modifier.padding(8.dp));Spacer(Modifier.height(20.dp));Button({if(name.isBlank())error="Enter staff name" else if(pin!="1234")error="Invalid PIN. Demo PIN is 1234" else onLogin(name.trim())},Modifier.fillMaxWidth().height(50.dp)){Text("INITIALIZE TERMINAL",fontWeight=FontWeight.ExtraBold)}}}}}
 
-    MaterialTheme(colorScheme = lightColorScheme(primary = Red, background = Color(0xFFFDFDFD), surface = Color.White)) {
-        if (!loggedIn) LoginScreen { name -> staff = name; loggedIn = true }
-        else Scaffold(
-            topBar = { TopAppBar(title = { Text("CrewBuzz", fontWeight = FontWeight.Black, color = Red) }, actions = { Text(staff, color = Red, fontWeight = FontWeight.Bold); Spacer(Modifier.width(16.dp)) }) },
-            bottomBar = { NavigationBar { listOf("Dashboard", "Devices", "History", "Settings").forEachIndexed { i, label -> NavigationBarItem(page == i, { page = i }, icon = { Icon(if (i == 0) Icons.Default.Dashboard else if (i == 1) Icons.Default.Router else if (i == 2) Icons.Default.History else Icons.Default.Settings, label) }, label = { Text(label) }) } } }
-        ) { pad ->
-            Box(Modifier.padding(pad).fillMaxSize().background(Color(0xFFFDFDFD))) {
-                when (page) {
-                    0 -> Dashboard(state, onCall = { table, type -> state = state.copy(calls = state.calls + Call(nextId++, table, type, System.currentTimeMillis())) }, onAttend = { id ->
-                        val c = state.calls.firstOrNull { it.id == id }
-                        if (c != null) {
-                            val done = c.copy(attended = System.currentTimeMillis(), staff = staff)
-                            state = state.copy(calls = state.calls.filterNot { it.id == id }, history = listOf(done) + state.history)
-                        }
-                    })
-                    1 -> Devices(state, onToggle = { id -> state = state.copy(devices = state.devices.map { if (it.id == id) it.copy(online = !it.online) else it }) }, onAdd = { id, name, table -> state = state.copy(devices = state.devices + Device(id.ifBlank { "DEV-${state.devices.size + 1}" }, name.ifBlank { "$table Call Bell" }, table.ifBlank { "Table ${state.devices.size + 1}" })) }, onDelete = { id -> state = state.copy(devices = state.devices.filterNot { it.id == id }) })
-                    2 -> History(state.history, onClear = { state = state.copy(history = emptyList()) })
-                    3 -> Settings(staff, onReset = { state = state.copy(calls = emptyList()) }, onLogout = { loggedIn = false; staff = ""; page = 0 })
-                }
-            }
-        }
-    }
-}
+@Composable private fun Dashboard(s:AppState,onCall:(String,String)->Unit,onAttend:(Int)->Unit){var tick by remember{mutableLongStateOf(System.currentTimeMillis())};LaunchedEffect(Unit){while(true){kotlinx.coroutines.delay(1000);tick=System.currentTimeMillis()}};val tables=listOf("Table 1","Table 2","Table 3","Table 4","Table 12","VIP A","VIP B","Bar 1");Column(Modifier.fillMaxSize().padding(16.dp)){Row(horizontalArrangement=Arrangement.spacedBy(12.dp),modifier=Modifier.fillMaxWidth()){StatCard("ACTIVE CALLS",s.calls.size.toString(),Red,Modifier.weight(1f));StatCard("ONLINE DEVICES","${s.devices.count{it.online}}/${s.devices.size}",Slate,Modifier.weight(1f))};Card(Modifier.fillMaxWidth().padding(vertical=8.dp)){Column(Modifier.padding(14.dp)){Text("SIMULATOR PANEL • TRIGGER CALL",color=Red,fontWeight=FontWeight.Black,fontSize=11.sp);Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){tables.forEach{t->OutlinedButton({onCall(t,listOf("SERVICE","BILL","WATER","URGENT").random()}){Text(t,fontSize=11.sp)}}}}};Text("LIVE SERVICE QUEUE",fontWeight=FontWeight.Black,letterSpacing=1.sp,modifier=Modifier.padding(vertical=10.dp));if(s.calls.isEmpty())Box(Modifier.fillMaxSize(),Alignment.Center){Column(horizontalAlignment=Alignment.CenterHorizontally){Icon(Icons.Default.CheckCircle,null,tint=Green,modifier=Modifier.size(52.dp));Text("ALL RECIPIENTS SERVED",fontWeight=FontWeight.Bold)}}else LazyColumn(verticalArrangement=Arrangement.spacedBy(10.dp)){items(s.calls.sortedWith(compareByDescending<Call>{it.type=="URGENT"}.thenBy{it.created})){c->Card(Modifier.fillMaxWidth()){Row(Modifier.padding(14.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(c.table,fontSize=17.sp,fontWeight=FontWeight.Black);Text("${c.type} • ${((tick-c.created)/1000).coerceAtLeast(0)}s ago",color=Muted,fontSize=11.sp)};Button({onAttend(c.id)}){Icon(Icons.Default.Check,null,Modifier.size(14.dp));Spacer(Modifier.width(4.dp));Text("ATTEND")}}}}}}}
 
-@Composable private fun LoginScreen(onLogin: (String) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var pin by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf("") }
-    Box(Modifier.fillMaxSize().background(Color(0xFFFDFDFD)), Alignment.Center) {
-        Card(Modifier.fillMaxWidth().padding(24.dp), shape = RoundedCornerShape(24.dp)) {
-            Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.Restaurant, null, tint = Red, modifier = Modifier.size(48.dp))
-                Spacer(Modifier.height(16.dp)); Text("CrewBuzz Terminal", fontSize = 24.sp, fontWeight = FontWeight.Black)
-                Text("Waitstaff paging dashboard receiver unit", color = Muted, fontSize = 12.sp); Spacer(Modifier.height(24.dp))
-                OutlinedTextField(name, { name = it }, label = { Text("Waiter Name / ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(pin, { if (it.length <= 4) pin = it }, label = { Text("Station PIN Code") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-                if (error.isNotEmpty()) Text(error, color = Red, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
-                Spacer(Modifier.height(20.dp))
-                Button(onClick = { if (name.isBlank()) error = "Enter staff name" else if (pin != "1234") error = "Invalid PIN. Demo PIN is 1234" else onLogin(name.trim()) }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("INITIALIZE TERMINAL", fontWeight = FontWeight.ExtraBold) }
-            }
-        }
-    }
-}
+@Composable private fun StatCard(title:String,value:String,color:Color,modifier:Modifier){Card(modifier){Column(Modifier.padding(16.dp)){Text(title,fontSize=10.sp,color=Muted,fontWeight=FontWeight.Bold);Text(value,fontSize=30.sp,color=color,fontWeight=FontWeight.Black)}}}
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable private fun Dashboard(s: AppState, onCall: (String, String) -> Unit, onAttend: (Int) -> Unit) {
-    var tick by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1000); tick = System.currentTimeMillis() } }
-    val tables = listOf("Table 1", "Table 2", "Table 3", "Table 4", "Table 12", "VIP A", "VIP B", "Bar 1")
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-            StatCard("ACTIVE CALLS", s.calls.size.toString(), Red, Modifier.weight(1f)); StatCard("ONLINE DEVICES", "${s.devices.count { it.online }}/${s.devices.size}", Slate, Modifier.weight(1f))
-        }
-        Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Column(Modifier.padding(14.dp)) {
-            Text("SIMULATOR PANEL • TRIGGER CALL", color = Red, fontWeight = FontWeight.Black, fontSize = 11.sp)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { tables.forEach { t -> OutlinedButton({ onCall(t, listOf("SERVICE", "BILL", "WATER", "URGENT").random()) }) { Text(t, fontSize = 11.sp) } } }
-        } }
-        Text("LIVE SERVICE QUEUE", fontWeight = FontWeight.Black, letterSpacing = 1.sp, modifier = Modifier.padding(vertical = 10.dp))
-        if (s.calls.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.CheckCircle, null, tint = Green, modifier = Modifier.size(52.dp)); Text("ALL RECIPIENTS SERVED", fontWeight = FontWeight.Bold) } }
-        else LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) { items(s.calls.sortedWith(compareByDescending<Call> { it.type == "URGENT" }.thenBy { it.created })) { c ->
-            Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(c.table, fontSize = 17.sp, fontWeight = FontWeight.Black); Text("${c.type} • ${((tick - c.created) / 1000).coerceAtLeast(0)}s ago", color = Muted, fontSize = 11.sp) }; Button({ onAttend(c.id) }) { Icon(Icons.Default.Check, null, Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("ATTEND") } } }
-        } }
-    }
-}
+@Composable private fun Devices(s:AppState,onToggle:(String)->Unit,onAdd:(String,String,String)->Unit,onDelete:(String)->Unit){var add by remember{mutableStateOf(false)};var id by remember{mutableStateOf("")};var name by remember{mutableStateOf("")};var table by remember{mutableStateOf("")};Column(Modifier.fillMaxSize().padding(16.dp)){Row(Modifier.fillMaxWidth(),Arrangement.SpaceBetween,Alignment.CenterVertically){Column{Text("PAGER & ALERT NETWORK",fontWeight=FontWeight.Black);Text("Device status overview",color=Muted,fontSize=11.sp)};Button({add=!add}){Text(if(add)"CANCEL" else "REGISTER")}};if(add)Card(Modifier.fillMaxWidth().padding(vertical=8.dp)){Column(Modifier.padding(12.dp)){OutlinedTextField(id,{id=it},label={Text("Device ID")},singleLine=true,modifier=Modifier.fillMaxWidth());OutlinedTextField(name,{name=it},label={Text("Display Name")},singleLine=true,modifier=Modifier.fillMaxWidth());OutlinedTextField(table,{table=it},label={Text("Table")},singleLine=true,modifier=Modifier.fillMaxWidth());Button({onAdd(id,name,table);id="";name="";table="";add=false},Modifier.fillMaxWidth()){Text("PROVISION NETWORK DEVICE")}}};LazyColumn(verticalArrangement=Arrangement.spacedBy(10.dp)){items(s.devices){d->Card(Modifier.fillMaxWidth()){Column(Modifier.padding(14.dp)){Row(Modifier.fillMaxWidth(),Arrangement.SpaceBetween){Text(d.table,fontWeight=FontWeight.Black,color=Red);IconButton({onDelete(d.id)}){Icon(Icons.Default.DeleteOutline,null)}};Text(d.name,fontWeight=FontWeight.Bold);Text("ID: ${d.id}",color=Muted,fontSize=11.sp);Row(Modifier.fillMaxWidth().padding(top=10.dp),Arrangement.SpaceBetween){Text(if(d.online)"● ONLINE" else "● OFFLINE",color=if(d.online)Green else Muted,fontWeight=FontWeight.Bold);Text("Battery ${d.battery}%",color=Muted);TextButton({onToggle(d.id)}){Text("TOGGLE")}}}}}}}}
 
-@Composable private fun StatCard(title: String, value: String, color: Color, modifier: Modifier) { Card(modifier) { Column(Modifier.padding(16.dp)) { Text(title, fontSize = 10.sp, color = Muted, fontWeight = FontWeight.Bold); Text(value, fontSize = 30.sp, color = color, fontWeight = FontWeight.Black) } } }
+@Composable private fun History(history:List<Call>,onClear:()->Unit){Column(Modifier.fillMaxSize().padding(16.dp)){Row(Modifier.fillMaxWidth(),Arrangement.SpaceBetween,Alignment.CenterVertically){Text("ATTENDED CALL LOG",fontWeight=FontWeight.Black);TextButton(onClear){Text("CLEAR ALL",color=Red)}};if(history.isEmpty())Box(Modifier.fillMaxSize(),Alignment.Center){Text("History Queue is Empty",color=Muted)}else LazyColumn(verticalArrangement=Arrangement.spacedBy(10.dp)){items(history){c->Card(Modifier.fillMaxWidth()){Row(Modifier.padding(14.dp),Arrangement.SpaceBetween){Column{Text(c.table,fontWeight=FontWeight.Bold);Text(c.type,color=Muted,fontSize=11.sp)};Column(horizontalAlignment=Alignment.End){Text(c.staff?:"Staff",fontWeight=FontWeight.Bold);val sec=((c.attended?:c.created)-c.created)/1000;Text("Served in ${sec}s",color=Green,fontSize=11.sp)}}}}}}}
 
-@Composable private fun Devices(s: AppState, onToggle: (String) -> Unit, onAdd: (String, String, String) -> Unit, onDelete: (String) -> Unit) {
-    var add by remember { mutableStateOf(false) }; var id by remember { mutableStateOf("") }; var name by remember { mutableStateOf("") }; var table by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Column { Text("PAGER & ALERT NETWORK", fontWeight = FontWeight.Black); Text("Device status overview", color = Muted, fontSize = 11.sp) }; Button({ add = !add }) { Text(if (add) "CANCEL" else "REGISTER") } }
-        if (add) Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Column(Modifier.padding(12.dp)) { OutlinedTextField(id, { id = it }, label = { Text("Device ID") }, singleLine = true, modifier = Modifier.fillMaxWidth()); OutlinedTextField(name, { name = it }, label = { Text("Display Name") }, singleLine = true, modifier = Modifier.fillMaxWidth()); OutlinedTextField(table, { table = it }, label = { Text("Table") }, singleLine = true, modifier = Modifier.fillMaxWidth()); Button({ onAdd(id, name, table); id = ""; name = ""; table = ""; add = false }, Modifier.fillMaxWidth()) { Text("PROVISION NETWORK DEVICE") } } }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) { items(s.devices) { d -> Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp)) { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text(d.table, fontWeight = FontWeight.Black, color = Red); IconButton({ onDelete(d.id) }) { Icon(Icons.Default.DeleteOutline, null) } }; Text(d.name, fontWeight = FontWeight.Bold); Text("ID: ${d.id}", color = Muted, fontSize = 11.sp); Row(Modifier.fillMaxWidth().padding(top = 10.dp), Arrangement.SpaceBetween) { Text(if (d.online) "● ONLINE" else "● OFFLINE", color = if (d.online) Green else Muted, fontWeight = FontWeight.Bold); Text("Battery ${d.battery}%", color = Muted); TextButton({ onToggle(d.id) }) { Text("TOGGLE") } } } } } }
-    }
-}
-
-@Composable private fun History(history: List<Call>, onClear: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp)) { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("ATTENDED CALL LOG", fontWeight = FontWeight.Black); TextButton(onClear) { Text("CLEAR ALL", color = Red) } }
-        if (history.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text("History Queue is Empty", color = Muted) }
-        else LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) { items(history) { c -> Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(14.dp), Arrangement.SpaceBetween) { Column { Text(c.table, fontWeight = FontWeight.Bold); Text(c.type, color = Muted, fontSize = 11.sp) }; Column(horizontalAlignment = Alignment.End) { Text(c.staff ?: "Staff", fontWeight = FontWeight.Bold); val sec = ((c.attended ?: c.created) - c.created) / 1000; Text("Served in ${sec}s", color = Green, fontSize = 11.sp) } } } } }
-    }
-}
-
-@Composable private fun Settings(staff: String, onReset: () -> Unit, onLogout: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("RECEIVING TERMINAL SETTINGS", fontWeight = FontWeight.Black)
-        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) { Text("ACTIVE TERMINAL OPERATOR", color = Red, fontWeight = FontWeight.Bold); Text(staff, fontWeight = FontWeight.Bold, fontSize = 18.sp); Text("Assigned Floor Zone: Main Hall", color = Muted, fontSize = 11.sp) } }
-        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) { Text("HARDWARE PARAMETERS", color = Red, fontWeight = FontWeight.Bold); Text("Receiver RF Channel     433.92 Mhz (CH5)"); Text("Firmware Build          v1.4.1-P1-NoDB"); Text("AP Link Mode            STANDALONE LOCAL", color = Green) } }
-        Spacer(Modifier.weight(1f)); Button(onReset, Modifier.fillMaxWidth()) { Text("RESET ALL ACTIVE SESSIONS") }; Button(onLogout, Modifier.fillMaxWidth()) { Text("DE-AUTHORIZE TERMINAL UNIT") }
-    }
-}
+@Composable private fun Settings(staff:String,onReset:()->Unit,onLogout:()->Unit){Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(16.dp)){Text("RECEIVING TERMINAL SETTINGS",fontWeight=FontWeight.Black);Card(Modifier.fillMaxWidth()){Column(Modifier.padding(16.dp)){Text("ACTIVE TERMINAL OPERATOR",color=Red,fontWeight=FontWeight.Bold);Text(staff,fontWeight=FontWeight.Bold,fontSize=18.sp);Text("Assigned Floor Zone: Main Hall",color=Muted,fontSize=11.sp)}};Card(Modifier.fillMaxWidth()){Column(Modifier.padding(16.dp)){Text("HARDWARE PARAMETERS",color=Red,fontWeight=FontWeight.Bold);Text("Receiver RF Channel     433.92 Mhz (CH5)");Text("Firmware Build          v1.4.1-P1-NoDB");Text("AP Link Mode            STANDALONE LOCAL",color=Green)}};Spacer(Modifier.weight(1f));Button(onReset,Modifier.fillMaxWidth()){Text("RESET ALL ACTIVE SESSIONS")};Button(onLogout,Modifier.fillMaxWidth()){Text("DE-AUTHORIZE TERMINAL UNIT")}}}

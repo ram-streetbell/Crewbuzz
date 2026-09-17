@@ -28,7 +28,7 @@ private val Slate = Color(0xFF0F172A)
 private val Muted = Color(0xFF64748B)
 private data class Call(val id: Int, val table: String, val type: String, val created: Long, val attended: Long? = null, val staff: String? = null)
 private data class Device(val id: String, val name: String, val table: String, val online: Boolean = true, val battery: Int = 100)
-data class AppState(val calls: List<Call>, val history: List<Call>, val devices: List<Device>)
+private data class AppState(val calls: List<Call>, val history: List<Call>, val devices: List<Device>)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {

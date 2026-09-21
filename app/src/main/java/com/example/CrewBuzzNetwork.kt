@@ -10,11 +10,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -40,8 +42,11 @@ object CrewBuzzNetwork {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _tableCalls = MutableSharedFlow<TableCallEvent>(extraBufferCapacity = 32)
     val tableCalls = _tableCalls.asSharedFlow()
-    private val _devices = MutableSharedFlow<CrewBuzzDeviceEvent>(extraBufferCapacity = 32)
-    val devices = _devices.asSharedFlow()
+
+    // StateFlow keeps the latest discovered device, so the UI cannot miss a
+    // discovery packet while Compose is starting its collector.
+    private val _devices = MutableStateFlow<Map<String, CrewBuzzDeviceEvent>>(emptyMap())
+    val devices = _devices.asStateFlow()
 
     @Volatile private var started = false
     @Volatile private var discoverySocket: DatagramSocket? = null
@@ -62,8 +67,8 @@ object CrewBuzzNetwork {
                             val files = HashMap<String, String>()
                             session.parseBody(files)
                             val body = files["postData"] ?: ""
-                            val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
-                            val request = Regex("""["']request["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1) ?: "WAITER"
+                            val table = Regex("""[\"']table_id[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
+                            val request = Regex("""[\"']request[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1) ?: "WAITER"
                             if (table.isNullOrBlank()) {
                                 newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
                             } else {
@@ -98,6 +103,12 @@ object CrewBuzzNetwork {
 
         scope.launch { discoveryLoop() }
         scope.launch { broadcastDeviceDiscovery() }
+        scope.launch {
+            // Give Android time to finish obtaining the Wi-Fi link address,
+            // then perform a real HTTP scan automatically.
+            delay(800)
+            scanNow(context)
+        }
     }
 
     fun scanNow() {
@@ -112,20 +123,19 @@ object CrewBuzzNetwork {
             wifiNetwork = network
             val localIp = localIpv4(context, network)
             val prefix = localIp.substringBeforeLast('.', "")
-            if (prefix.isBlank()) return@launch
+            if (prefix.isBlank() || prefix == "0.0.0") return@launch
 
-            // Always test the currently known ESP first. This makes the scanner
-            // work even when the router blocks broadcast or UDP discovery.
+            // Known working ESP address is checked first. The browser test on
+            // the tablet already proved that this endpoint is reachable.
             probeHttpDevice("$prefix.48", network)
 
             val socket = discoverySocket
             if (socket != null && !socket.isClosed) {
                 sendDiscoveryBroadcast(socket)
-                (1..254).forEach { host ->
-                    sendDiscoveryTo(socket, "$prefix.$host")
-                }
             }
 
+            // HTTP probing is the fallback when UDP broadcast/client isolation
+            // prevents discovery. Limit concurrency so the tablet stays stable.
             scanLocalHttp(prefix, network)
         }
     }
@@ -163,7 +173,7 @@ object CrewBuzzNetwork {
     }
 
     private suspend fun scanLocalHttp(prefix: String, network: Network?) {
-        val semaphore = Semaphore(32)
+        val semaphore = Semaphore(24)
         val jobs = (1..254).map { host ->
             scope.async {
                 semaphore.withPermit {
@@ -178,8 +188,8 @@ object CrewBuzzNetwork {
         try {
             val socket: Socket = if (network != null) network.socketFactory.createSocket() else Socket()
             socket.use { s ->
-                s.connect(InetSocketAddress(ip, DEVICE_HTTP_PORT), 500)
-                s.soTimeout = 700
+                s.connect(InetSocketAddress(ip, DEVICE_HTTP_PORT), 450)
+                s.soTimeout = 900
 
                 OutputStreamWriter(s.getOutputStream(), Charsets.US_ASCII).use { writer ->
                     writer.write("GET /crewbuzz HTTP/1.1\r\nHost: $ip\r\nConnection: close\r\n\r\n")
@@ -194,11 +204,12 @@ object CrewBuzzNetwork {
                     }
                     if (!statusOk) return
                     val body = reader.readText()
-                    val type = Regex("""["']type["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
-                    val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
-                    val device = Regex("""["']device_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                    val type = Regex("""[\"']type[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
+                    val table = Regex("""[\"']table_id[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
+                    val device = Regex("""[\"']device_id[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
                     if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) {
-                        _devices.tryEmit(CrewBuzzDeviceEvent(table, device, ip))
+                        val event = CrewBuzzDeviceEvent(table, device, ip)
+                        _devices.value = _devices.value + (device to event)
                     }
                 }
             }
@@ -226,7 +237,8 @@ object CrewBuzzNetwork {
                     } else if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
                         if (parts.size >= 4) {
-                            _devices.tryEmit(CrewBuzzDeviceEvent(parts[1], parts[2], parts[3]))
+                            val event = CrewBuzzDeviceEvent(parts[1], parts[2], parts[3])
+                            _devices.value = _devices.value + (event.deviceId to event)
                         }
                     }
                 } catch (_: SocketTimeoutException) {

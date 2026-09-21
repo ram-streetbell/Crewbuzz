@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
@@ -43,40 +44,22 @@ object CrewBuzzNetwork {
                             val files = HashMap<String, String>()
                             session.parseBody(files)
                             val body = files["postData"] ?: ""
-
                             val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""")
                                 .find(body)?.groupValues?.get(1)
                             val request = Regex("""["']request["']\s*:\s*["']([^"']+)["']""")
                                 .find(body)?.groupValues?.get(1) ?: "WAITER"
 
                             if (table.isNullOrBlank()) {
-                                newFixedLengthResponse(
-                                    NanoHTTPD.Response.Status.BAD_REQUEST,
-                                    "text/plain",
-                                    "Missing table_id"
-                                )
+                                newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
                             } else {
                                 _tableCalls.tryEmit(TableCallEvent(table, request))
-                                newFixedLengthResponse(
-                                    Response.Status.OK,
-                                    "application/json",
-                                    """{"ok":true}"""
-                                )
+                                newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", """{"ok":true}""")
                             }
                         } catch (e: Exception) {
-                            newFixedLengthResponse(
-                                Response.Status.INTERNAL_ERROR,
-                                "text/plain",
-                                e.message ?: "error"
-                            )
+                            newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "text/plain", e.message ?: "error")
                         }
                     }
-
-                    return newFixedLengthResponse(
-                        Response.Status.NOT_FOUND,
-                        "text/plain",
-                        "Not found"
-                    )
+                    return newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, "text/plain", "Not found")
                 }
             }.also {
                 it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
@@ -90,14 +73,20 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
-    private fun discoveryLoop() {
     private suspend fun broadcastDeviceDiscovery() {
         while (started) {
             try {
                 DatagramSocket().use { socket ->
                     socket.broadcast = true
                     val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
-                    socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
+                    socket.send(
+                        DatagramPacket(
+                            bytes,
+                            bytes.size,
+                            InetAddress.getByName("255.255.255.255"),
+                            DISCOVERY_PORT
+                        )
+                    )
                 }
             } catch (_: Exception) {
             }
@@ -105,6 +94,7 @@ object CrewBuzzNetwork {
         }
     }
 
+    private fun discoveryLoop() {
         DatagramSocket(DISCOVERY_PORT).use { socket ->
             socket.soTimeout = 1000
             socket.reuseAddress = true
@@ -114,29 +104,17 @@ object CrewBuzzNetwork {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
-
                     val message = String(packet.data, 0, packet.length).trim()
+
                     if (message == "CREWBUZZ_DISCOVER") {
-                        val response = "CREWBUZZ|${localIpv4()}|$HTTP_PORT|$DEVICE_ID"
+                        val response = "CREWBUZZ|" + localIpv4() + "|" + HTTP_PORT + "|" + DEVICE_ID
                         val bytes = response.toByteArray()
-                        socket.send(
-                            DatagramPacket(
-                                bytes,
-                                bytes.size,
-                                packet.address,
-                                packet.port
-                            )
-                        )
-                    }
-                    if (message.startsWith("CREWBUZZ_DEVICE|")) {
+                        socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
+                    } else if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
                         if (parts.size >= 4) {
                             _devices.tryEmit(CrewBuzzDeviceEvent(parts[1], parts[2], parts[3]))
                         }
-                    } else if (message == "CREWBUZZ_DEVICE_DISCOVER") {
-                        val response = "CREWBUZZ_TERMINAL|" + localIpv4() + "|" + HTTP_PORT + "|" + DEVICE_ID
-                        val bytes = response.toByteArray()
-                        socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
                     }
                 } catch (_: SocketTimeoutException) {
                 } catch (_: SocketException) {

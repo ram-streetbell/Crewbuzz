@@ -11,8 +11,11 @@ import kotlinx.coroutines.launch
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.HttpURLConnection
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import fi.iki.elonen.NanoHTTPD
 
 data class TableCallEvent(val tableId: String, val request: String)
@@ -45,14 +48,10 @@ object CrewBuzzNetwork {
                             val files = HashMap<String, String>()
                             session.parseBody(files)
                             val body = files["postData"] ?: ""
-                            val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""")
-                                .find(body)?.groupValues?.get(1)
-                            val request = Regex("""["']request["']\s*:\s*["']([^"']+)["']""")
-                                .find(body)?.groupValues?.get(1) ?: "WAITER"
-
-                            if (table.isNullOrBlank()) {
-                                newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
-                            } else {
+                            val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                            val request = Regex("""["']request["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1) ?: "WAITER"
+                            if (table.isNullOrBlank()) newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
+                            else {
                                 _tableCalls.tryEmit(TableCallEvent(table, request))
                                 newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", """{"ok":true}""")
                             }
@@ -62,9 +61,7 @@ object CrewBuzzNetwork {
                     }
                     return newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, "text/plain", "Not found")
                 }
-            }.also {
-                it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            }
+            }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
         } catch (_: Exception) {
             started = false
             return
@@ -74,24 +71,32 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
-    /**
-     * Manual scan. Broadcast UDP is not reliable on every Android/router setup,
-     * so also probe every address in the tablet's local /24 subnet using UDP 4001.
-     */
     fun scanNow() {
         if (!started) return
         scope.launch {
             val socket = discoverySocket ?: return@launch
-            val ip = localIpv4()
-            val prefix = ip.substringBeforeLast('.', "")
-            if (prefix.isNotBlank()) {
-                for (host in 1..254) {
-                    val target = "$prefix.$host"
-                    sendDiscoveryTo(socket, target)
-                    if (host % 16 == 0) delay(15)
-                }
+            val localIp = localIpv4()
+            val prefix = localIp.substringBeforeLast('.', "")
+            if (prefix.isBlank()) return@launch
+
+            // UDP discovery, using the same bound port that receives replies.
+            for (host in 1..254) {
+                sendDiscoveryTo(socket, "$prefix.$host")
+                if (host % 16 == 0) delay(10)
             }
             sendDiscoveryBroadcast(socket)
+
+            // Reliable fallback: query the ESP's tiny HTTP identification endpoint.
+            val found = ConcurrentHashMap.newKeySet<String>()
+            val jobs = (1..254).map { host ->
+                scope.launch {
+                    val ip = "$prefix.$host"
+                    if (found.contains(ip)) return@launch
+                    val event = probeHttpDevice(ip)
+                    if (event != null && found.add(ip)) _devices.tryEmit(event)
+                }
+            }
+            jobs.forEach { it.join() }
         }
     }
 
@@ -106,19 +111,9 @@ object CrewBuzzNetwork {
         try {
             val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
             synchronized(socket) {
-                if (!socket.isClosed) {
-                    socket.send(
-                        DatagramPacket(
-                            bytes,
-                            bytes.size,
-                            InetAddress.getByName(targetIp),
-                            DISCOVERY_PORT
-                        )
-                    )
-                }
+                if (!socket.isClosed) socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(targetIp), DISCOVERY_PORT))
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     private fun sendDiscoveryBroadcast(socket: DatagramSocket) {
@@ -127,17 +122,31 @@ object CrewBuzzNetwork {
             synchronized(socket) {
                 if (!socket.isClosed) {
                     socket.broadcast = true
-                    socket.send(
-                        DatagramPacket(
-                            bytes,
-                            bytes.size,
-                            InetAddress.getByName("255.255.255.255"),
-                            DISCOVERY_PORT
-                        )
-                    )
+                    socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
                 }
             }
+        } catch (_: Exception) {}
+    }
+
+    private fun probeHttpDevice(ip: String): CrewBuzzDeviceEvent? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL("http://$ip/crewbuzz").openConnection() as HttpURLConnection).apply {
+                connectTimeout = 250
+                readTimeout = 250
+                requestMethod = "GET"
+                useCaches = false
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val type = Regex("""\"type\"\s*:\s*\"([^\"]+)\"""").find(body)?.groupValues?.get(1)
+            val table = Regex("""\"table_id\"\s*:\s*\"([^\"]+)\"""").find(body)?.groupValues?.get(1)
+            val device = Regex("""\"device_id\"\s*:\s*\"([^\"]+)\"""").find(body)?.groupValues?.get(1)
+            if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) CrewBuzzDeviceEvent(table, device, ip) else null
         } catch (_: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -152,34 +161,25 @@ object CrewBuzzNetwork {
             started = false
             return
         }
-
         discoverySocket = socket
         val buffer = ByteArray(512)
-
         try {
             while (started) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
                     val message = String(packet.data, 0, packet.length).trim()
-
                     if (message == "CREWBUZZ_DISCOVER") {
-                        val response = "CREWBUZZ|" + localIpv4() + "|" + HTTP_PORT + "|" + DEVICE_ID
+                        val response = "CREWBUZZ|${localIpv4()}|$HTTP_PORT|$DEVICE_ID"
                         val bytes = response.toByteArray()
-                        synchronized(socket) {
-                            socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
-                        }
+                        synchronized(socket) { socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port)) }
                     } else if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
-                        if (parts.size >= 4) {
-                            _devices.tryEmit(CrewBuzzDeviceEvent(parts[1], parts[2], parts[3]))
-                        }
+                        if (parts.size >= 4) _devices.tryEmit(CrewBuzzDeviceEvent(parts[1], parts[2], parts[3]))
                     }
-                } catch (_: SocketTimeoutException) {
-                } catch (_: SocketException) {
-                    break
-                } catch (_: Exception) {
-                }
+                } catch (_: SocketTimeoutException) {}
+                catch (_: SocketException) { break }
+                catch (_: Exception) {}
             }
         } finally {
             discoverySocket = null
@@ -194,8 +194,6 @@ object CrewBuzzNetwork {
             val ip = socket.localAddress.hostAddress ?: "0.0.0.0"
             socket.close()
             ip
-        } catch (_: Exception) {
-            "0.0.0.0"
-        }
+        } catch (_: Exception) { "0.0.0.0" }
     }
 }

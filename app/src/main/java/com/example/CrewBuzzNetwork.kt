@@ -12,9 +12,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketException
 import java.net.SocketTimeoutException
-import fi.iki.elonen.IHTTPSession
-import org.nanohttpd.protocols.http.NanoHTTPD
-import fi.iki.elonen.NanoHTTPD.Response
+import fi.iki.elonen.NanoHTTPD
 
 data class TableCallEvent(val tableId: String, val request: String)
 
@@ -36,8 +34,8 @@ object CrewBuzzNetwork {
 
         try {
             httpServer = object : NanoHTTPD(HTTP_PORT) {
-                override fun serve(session: IHTTPSession): Response {
-                    if (session.method == Method.POST && session.uri == "/request") {
+                override fun serve(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+                    if (session.method == NanoHTTPD.Method.POST && session.uri == "/request") {
                         return try {
                             val files = HashMap<String, String>()
                             session.parseBody(files)
@@ -50,7 +48,7 @@ object CrewBuzzNetwork {
 
                             if (table.isNullOrBlank()) {
                                 newFixedLengthResponse(
-                                    Response.Status.BAD_REQUEST,
+                                    NanoHTTPD.Response.Status.BAD_REQUEST,
                                     "text/plain",
                                     "Missing table_id"
                                 )

@@ -174,16 +174,17 @@ object CrewBuzzNetwork {
             val url = URL("http://$ip:$DEVICE_HTTP_PORT/crewbuzz")
             val opened = if (network != null) network.openConnection(url) else url.openConnection()
             connection = opened as HttpURLConnection
-            connection.connectTimeout = 500
-            connection.readTimeout = 500
+            connection.connectTimeout = 700
+            connection.readTimeout = 700
             connection.requestMethod = "GET"
             connection.useCaches = false
 
             if (connection.responseCode == HttpURLConnection.HTTP_OK) {
                 val body = connection.inputStream.bufferedReader().use { it.readText() }
-                val type = Regex("""\"type\"\s*:\s*\"([^\"]+)\"""").find(body)?.groupValues?.get(1)
-                val table = Regex("""\"table_id\"\s*:\s*\"([^\"]+)\"""").find(body)?.groupValues?.get(1)
-                val device = Regex("""\"device_id\"\s*:\s*\"([^\"]+)\"""").find(body)?.groupValues?.get(1)
+                // The ESP returns normal JSON. Keep the regex free of escaped quote characters.
+                val type = Regex("""["']type["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                val device = Regex("""["']device_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
                 if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) {
                     _devices.tryEmit(CrewBuzzDeviceEvent(table, device, ip))
                 }

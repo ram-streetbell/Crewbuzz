@@ -74,29 +74,55 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
-    // IMPORTANT: the scan request must originate from UDP 4001 because the ESP8266
-    // replies to the sender's source port. The old implementation used an ephemeral
-    // port, so the reply never reached discoveryLoop().
+    /**
+     * Manual scan. Broadcast UDP is not reliable on every Android/router setup,
+     * so also probe every address in the tablet's local /24 subnet using UDP 4001.
+     */
     fun scanNow() {
         if (!started) return
         scope.launch {
-            repeat(3) {
-                sendDeviceDiscoveryFromListener()
-                delay(300)
+            val socket = discoverySocket ?: return@launch
+            val ip = localIpv4()
+            val prefix = ip.substringBeforeLast('.', "")
+            if (prefix.isNotBlank()) {
+                for (host in 1..254) {
+                    val target = "$prefix.$host"
+                    sendDiscoveryTo(socket, target)
+                    if (host % 16 == 0) delay(15)
+                }
             }
+            sendDiscoveryBroadcast(socket)
         }
     }
 
     private suspend fun broadcastDeviceDiscovery() {
         while (started) {
-            sendDeviceDiscoveryFromListener()
+            discoverySocket?.let { sendDiscoveryBroadcast(it) }
             delay(5000)
         }
     }
 
-    private fun sendDeviceDiscoveryFromListener() {
+    private fun sendDiscoveryTo(socket: DatagramSocket, targetIp: String) {
         try {
-            val socket = discoverySocket ?: return
+            val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
+            synchronized(socket) {
+                if (!socket.isClosed) {
+                    socket.send(
+                        DatagramPacket(
+                            bytes,
+                            bytes.size,
+                            InetAddress.getByName(targetIp),
+                            DISCOVERY_PORT
+                        )
+                    )
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun sendDiscoveryBroadcast(socket: DatagramSocket) {
+        try {
             val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
             synchronized(socket) {
                 if (!socket.isClosed) {

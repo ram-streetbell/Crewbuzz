@@ -1,4 +1,5 @@
 #include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
 #include <WiFiUdp.h>
 
 // CHANGE THESE 3 VALUES
@@ -16,6 +17,7 @@ const unsigned long DEVICE_ANNOUNCE_INTERVAL = 5000;
 const unsigned long DEBOUNCE_MS = 500;
 
 WiFiUDP deviceUdp;
+ESP8266WebServer webServer(80);
 String crewbuzzIp = "";
 uint16_t crewbuzzPort = 8080;
 unsigned long lastDiscovery = 0;
@@ -25,6 +27,17 @@ bool lastTouchState = false;
 
 void setLed(bool on) {
   digitalWrite(LED_PIN, on ? LOW : HIGH);
+}
+
+void handleDeviceInfo() {
+  String json = String("{\"type\":\"CREWBUZZ_DEVICE\",\"table_id\":\"") + TABLE_ID +
+                "\",\"device_id\":\"" + DEVICE_ID +
+                "\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+  webServer.send(200, "application/json", json);
+}
+
+void handleHealth() {
+  webServer.send(200, "text/plain", "CREWBUZZ_OK");
 }
 
 void handleDeviceDiscovery() {
@@ -196,8 +209,13 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   deviceUdp.begin(DISCOVERY_PORT);
-  setLed(true);
 
+  webServer.on("/crewbuzz", HTTP_GET, handleDeviceInfo);
+  webServer.on("/health", HTTP_GET, handleHealth);
+  webServer.begin();
+  Serial.println("HTTP device server: port 80");
+
+  setLed(true);
   announceDevice();
   discoverCrewBuzz();
 }
@@ -211,6 +229,7 @@ void loop() {
   }
 
   setLed(true);
+  webServer.handleClient();
   handleDeviceDiscovery();
 
   if (millis() - lastDeviceAnnounce >= DEVICE_ANNOUNCE_INTERVAL) {

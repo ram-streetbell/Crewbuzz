@@ -1,24 +1,25 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 
+// CHANGE THESE 3 VALUES
 const char* WIFI_SSID = "YOUR_WIFI_NAME";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 const char* TABLE_ID = "TABLE_01";
 const char* DEVICE_ID = "ESP8266-01";
 
-#define TOUCH_PIN 4   // D2 / GPIO4
-#define LED_PIN   2   // D4 / GPIO2
+#define TOUCH_PIN 4   // D2 / GPIO4 - TTP223 OUT
+#define LED_PIN   2   // D4 / GPIO2 - built-in LED (active LOW)
 
 const unsigned int DISCOVERY_PORT = 4001;
 const unsigned long DISCOVERY_INTERVAL = 10000;
-const unsigned long DEBOUNCE_MS = 500;
 const unsigned long DEVICE_ANNOUNCE_INTERVAL = 5000;
-unsigned long lastDeviceAnnounce = 0;
+const unsigned long DEBOUNCE_MS = 500;
 
 WiFiUDP deviceUdp;
 String crewbuzzIp = "";
 uint16_t crewbuzzPort = 8080;
 unsigned long lastDiscovery = 0;
+unsigned long lastDeviceAnnounce = 0;
 unsigned long lastTouch = 0;
 bool lastTouchState = false;
 
@@ -27,11 +28,12 @@ void setLed(bool on) {
 }
 
 void handleDeviceDiscovery() {
-  int size = deviceUdp.parsePacket();
-  if (size <= 0) return;
+  int packetSize = deviceUdp.parsePacket();
+  if (packetSize <= 0) return;
 
   char buffer[128];
   int len = deviceUdp.read(buffer, sizeof(buffer) - 1);
+  if (len < 0) return;
   buffer[len] = '\0';
 
   String message = String(buffer);
@@ -45,18 +47,17 @@ void handleDeviceDiscovery() {
   }
 }
 
-bool announceDevice() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+void announceDevice() {
+  if (WiFi.status() != WL_CONNECTED) return;
 
   WiFiUDP udp;
-  if (!udp.begin(0)) return false;
+  if (!udp.begin(0)) return;
 
   String message = String("CREWBUZZ_DEVICE|") + TABLE_ID + "|" + DEVICE_ID + "|" + WiFi.localIP().toString();
   udp.beginPacket(IPAddress(255, 255, 255, 255), DISCOVERY_PORT);
   udp.print(message);
   udp.endPacket();
   udp.stop();
-  return true;
 }
 
 bool discoverCrewBuzz() {
@@ -72,32 +73,39 @@ bool discoverCrewBuzz() {
   unsigned long start = millis();
 
   while (millis() - start < 1500) {
-    int size = discovery.parsePacket();
+    int packetSize = discovery.parsePacket();
 
-    if (size > 0) {
+    if (packetSize > 0) {
       char buffer[256];
       int len = discovery.read(buffer, sizeof(buffer) - 1);
-      buffer[len] = '\0';
 
-      String response = String(buffer);
-      response.trim();
+      if (len > 0) {
+        buffer[len] = '\0';
+        String response = String(buffer);
+        response.trim();
 
-      if (response.startsWith("CREWBUZZ|")) {
-        int p1 = response.indexOf('|');
-        int p2 = response.indexOf('|', p1 + 1);
-        int p3 = response.indexOf('|', p2 + 1);
+        if (response.startsWith("CREWBUZZ|")) {
+          int p1 = response.indexOf('|');
+          int p2 = response.indexOf('|', p1 + 1);
+          int p3 = response.indexOf('|', p2 + 1);
 
-        if (p1 > 0 && p2 > p1 && p3 > p2) {
-          crewbuzzIp = response.substring(p1 + 1, p2);
-          crewbuzzPort = (uint16_t)response.substring(p2 + 1, p3).toInt();
+          if (p1 > 0 && p2 > p1 && p3 > p2) {
+            String newIp = response.substring(p1 + 1, p2);
+            uint16_t newPort = (uint16_t)response.substring(p2 + 1, p3).toInt();
 
-          Serial.print("CrewBuzz found: ");
-          Serial.print(crewbuzzIp);
-          Serial.print(":");
-          Serial.println(crewbuzzPort);
+            if (newIp.length() > 0 && newPort > 0) {
+              crewbuzzIp = newIp;
+              crewbuzzPort = newPort;
 
-          discovery.stop();
-          return true;
+              Serial.print("CrewBuzz found: ");
+              Serial.print(crewbuzzIp);
+              Serial.print(":");
+              Serial.println(crewbuzzPort);
+
+              discovery.stop();
+              return true;
+            }
+          }
         }
       }
     }
@@ -114,44 +122,43 @@ bool sendTableCall() {
     if (!discoverCrewBuzz()) return false;
   }
 
-  WiFiClient client;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    WiFiClient client;
 
-  if (!client.connect(crewbuzzIp.c_str(), crewbuzzPort)) {
-    crewbuzzIp = "";
+    if (client.connect(crewbuzzIp.c_str(), crewbuzzPort)) {
+      String json = String("{\"type\":\"TABLE_CALL\",\"table_id\":\"") + TABLE_ID + "\",\"request\":\"WAITER\"}";
 
-    if (!discoverCrewBuzz()) return false;
+      client.println("POST /request HTTP/1.1");
+      client.print("Host: ");
+      client.println(crewbuzzIp);
+      client.println("Content-Type: application/json");
+      client.print("Content-Length: ");
+      client.println(json.length());
+      client.println("Connection: close");
+      client.println();
+      client.print(json);
 
-    return sendTableCall();
-  }
+      unsigned long timeout = millis();
+      while (millis() - timeout < 2000) {
+        if (client.available()) {
+          String line = client.readStringUntil('\n');
+          if (line.length() > 0) {
+            client.stop();
+            return true;
+          }
+        }
 
-  String json = String("{\"type\":\"TABLE_CALL\",\"table_id\":\"") + TABLE_ID + "\",\"request\":\"WAITER\"}";
-
-  client.println("POST /request HTTP/1.1");
-  client.print("Host: ");
-  client.println(crewbuzzIp);
-  client.println("Content-Type: application/json");
-  client.print("Content-Length: ");
-  client.println(json.length());
-  client.println("Connection: close");
-  client.println();
-  client.print(json);
-
-  unsigned long timeout = millis();
-
-  while (client.connected() && millis() - timeout < 2000) {
-    while (client.available()) {
-      String line = client.readStringUntil('\n');
-
-      if (line == "\r") {
-        client.stop();
-        return true;
+        if (!client.connected()) break;
+        delay(2);
       }
+
+      client.stop();
     }
 
-    delay(1);
+    crewbuzzIp = "";
+    if (attempt == 0 && !discoverCrewBuzz()) return false;
   }
 
-  client.stop();
   return false;
 }
 
@@ -163,14 +170,24 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   setLed(false);
 
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("CrewBuzz ESP8266 TABLE DEVICE");
+  Serial.println("================================");
+  Serial.print("Table: ");
+  Serial.println(TABLE_ID);
+  Serial.print("Device: ");
+  Serial.println(DEVICE_ID);
+
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.print("Connecting to Wi-Fi");
-
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    Serial.print('.');
   }
 
   Serial.println();
@@ -178,8 +195,9 @@ void setup() {
   Serial.print("ESP IP: ");
   Serial.println(WiFi.localIP());
 
-  setLed(true);
   deviceUdp.begin(DISCOVERY_PORT);
+  setLed(true);
+
   announceDevice();
   discoverCrewBuzz();
 }
@@ -187,6 +205,7 @@ void setup() {
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     setLed(false);
+    WiFi.reconnect();
     delay(500);
     return;
   }
@@ -199,24 +218,18 @@ void loop() {
     announceDevice();
   }
 
-  if (millis() - lastDiscovery >= DISCOVERY_INTERVAL ||
-      crewbuzzIp.length() == 0) {
+  if (crewbuzzIp.length() == 0 || millis() - lastDiscovery >= DISCOVERY_INTERVAL) {
     lastDiscovery = millis();
     discoverCrewBuzz();
   }
 
-  bool touched = digitalRead(TOUCH_PIN) == HIGH;
+  bool touched = (digitalRead(TOUCH_PIN) == HIGH);
 
-  if (touched &&
-      !lastTouchState &&
-      millis() - lastTouch >= DEBOUNCE_MS) {
-
+  if (touched && !lastTouchState && millis() - lastTouch >= DEBOUNCE_MS) {
     lastTouch = millis();
-
     Serial.println("TABLE CALL");
 
     bool ok = sendTableCall();
-
     Serial.println(ok ? "Call delivered" : "Call delivery failed");
   }
 

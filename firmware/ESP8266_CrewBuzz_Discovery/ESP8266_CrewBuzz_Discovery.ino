@@ -15,6 +15,7 @@ const unsigned long DEBOUNCE_MS = 500;
 const unsigned long DEVICE_ANNOUNCE_INTERVAL = 5000;
 unsigned long lastDeviceAnnounce = 0;
 
+WiFiUDP deviceUdp;
 String crewbuzzIp = "";
 uint16_t crewbuzzPort = 8080;
 unsigned long lastDiscovery = 0;
@@ -23,6 +24,25 @@ bool lastTouchState = false;
 
 void setLed(bool on) {
   digitalWrite(LED_PIN, on ? LOW : HIGH);
+}
+
+void handleDeviceDiscovery() {
+  int size = deviceUdp.parsePacket();
+  if (size <= 0) return;
+
+  char buffer[128];
+  int len = deviceUdp.read(buffer, sizeof(buffer) - 1);
+  buffer[len] = '\0';
+
+  String message = String(buffer);
+  message.trim();
+
+  if (message == "CREWBUZZ_DEVICE_DISCOVER") {
+    String response = String("CREWBUZZ_DEVICE|") + TABLE_ID + "|" + DEVICE_ID + "|" + WiFi.localIP().toString();
+    deviceUdp.beginPacket(deviceUdp.remoteIP(), deviceUdp.remotePort());
+    deviceUdp.print(response);
+    deviceUdp.endPacket();
+  }
 }
 
 bool announceDevice() {
@@ -159,6 +179,7 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   setLed(true);
+  deviceUdp.begin(DISCOVERY_PORT);
   announceDevice();
   discoverCrewBuzz();
 }
@@ -171,6 +192,7 @@ void loop() {
   }
 
   setLed(true);
+  handleDeviceDiscovery();
 
   if (millis() - lastDeviceAnnounce >= DEVICE_ANNOUNCE_INTERVAL) {
     lastDeviceAnnounce = millis();

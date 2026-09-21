@@ -77,18 +77,26 @@ private fun CrewBuzzApp() {
             AppState(
                 calls = emptyList(),
                 history = emptyList(),
-                devices = listOf(
-                    Device("DEV-001", "Table 1 Call Bell", "Table 1", true, 96),
-                    Device("DEV-002", "Table 2 Call Bell", "Table 2", true, 88),
-                    Device("DEV-003", "Table 3 Call Bell", "Table 3", true, 92),
-                    Device("DEV-004", "Table 4 Call Bell", "Table 12", true, 45),
-                    Device("DEV-005", "VIP Booth A Pager", "VIP A", true, 100),
-                    Device("DEV-006", "VIP Booth B Pager", "VIP B", true, 98),
-                    Device("DEV-007", "Bar Counter 1 Button", "Bar 1", true, 75),
-                    Device("DEV-008", "Kitchen Order Alert", "Kitchen", false, 0)
-                )
+                devices = emptyList()
             )
         )
+    }
+
+    LaunchedEffect(Unit) {
+        CrewBuzzNetwork.devices.collectLatest { event ->
+            val exists = state.devices.any { it.id == event.deviceId }
+            if (!exists) {
+                state = state.copy(
+                    devices = state.devices + Device(
+                        id = event.deviceId,
+                        name = "ESP8266 Call Bell",
+                        table = event.tableId,
+                        online = true,
+                        battery = 100
+                    )
+                )
+            }
+        }
     }
 
     LaunchedEffect(Unit) {

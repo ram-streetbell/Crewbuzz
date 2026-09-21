@@ -32,12 +32,41 @@ void setLed(bool on) {
 void handleDeviceInfo() {
   String json = String("{\"type\":\"CREWBUZZ_DEVICE\",\"table_id\":\"") + TABLE_ID +
                 "\",\"device_id\":\"" + DEVICE_ID +
-                "\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+                "\",\"ip\":\"" + WiFi.localIP().toString() +
+                "\",\"tablet_ip\":\"" + crewbuzzIp +
+                "\",\"tablet_port\":" + String(crewbuzzPort) + "}";
   webServer.send(200, "application/json", json);
 }
 
 void handleHealth() {
   webServer.send(200, "text/plain", "CREWBUZZ_OK");
+}
+
+void handleConfigure() {
+  if (!webServer.hasArg("ip")) {
+    webServer.send(400, "text/plain", "Missing ip");
+    return;
+  }
+
+  String ip = webServer.arg("ip");
+  ip.trim();
+  uint16_t port = webServer.hasArg("port") ? (uint16_t)webServer.arg("port").toInt() : 8080;
+
+  IPAddress parsed;
+  if (ip.length() == 0 || !parsed.fromString(ip) || port == 0) {
+    webServer.send(400, "text/plain", "Invalid tablet address");
+    return;
+  }
+
+  crewbuzzIp = ip;
+  crewbuzzPort = port;
+
+  Serial.print("CrewBuzz configured: ");
+  Serial.print(crewbuzzIp);
+  Serial.print(":");
+  Serial.println(crewbuzzPort);
+
+  webServer.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleDeviceDiscovery() {
@@ -137,6 +166,7 @@ bool sendTableCall() {
 
   for (int attempt = 0; attempt < 2; attempt++) {
     WiFiClient client;
+    client.setTimeout(1200);
 
     if (client.connect(crewbuzzIp.c_str(), crewbuzzPort)) {
       String json = String("{\"type\":\"TABLE_CALL\",\"table_id\":\"") + TABLE_ID + "\",\"request\":\"WAITER\"}";
@@ -152,12 +182,17 @@ bool sendTableCall() {
       client.print(json);
 
       unsigned long timeout = millis();
-      while (millis() - timeout < 2000) {
+      while (millis() - timeout < 2500) {
         if (client.available()) {
           String line = client.readStringUntil('\n');
-          if (line.length() > 0) {
+          line.trim();
+          if (line.startsWith("HTTP/") && line.indexOf(" 200 ") >= 0) {
             client.stop();
             return true;
+          }
+          if (line.startsWith("HTTP/")) {
+            client.stop();
+            break;
           }
         }
 
@@ -212,6 +247,7 @@ void setup() {
 
   webServer.on("/crewbuzz", HTTP_GET, handleDeviceInfo);
   webServer.on("/health", HTTP_GET, handleHealth);
+  webServer.on("/configure", HTTP_GET, handleConfigure);
   webServer.begin();
   Serial.println("HTTP device server: port 80");
 

@@ -38,7 +38,6 @@ object CrewBuzzNetwork {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _tableCalls = MutableSharedFlow<TableCallEvent>(extraBufferCapacity = 64)
     val tableCalls = _tableCalls.asSharedFlow()
-
     private val _devices = MutableStateFlow<Map<String, CrewBuzzDeviceEvent>>(emptyMap())
     val devices = _devices.asStateFlow()
 
@@ -52,14 +51,12 @@ object CrewBuzzNetwork {
     fun start(context: Context) {
         if (started) return
         appContext = context.applicationContext
-
         try {
             val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             multicastLock = wifi.createMulticastLock("CrewBuzzDiscovery").apply {
                 setReferenceCounted(false)
                 acquire()
             }
-
             wifiNetwork = getLocalWifiNetwork(context)
 
             httpServer = object : NanoHTTPD(HTTP_PORT) {
@@ -68,14 +65,12 @@ object CrewBuzzNetwork {
                         when {
                             session.method == NanoHTTPD.Method.GET && session.uri == "/health" ->
                                 newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "text/plain", "CREWBUZZ_OK")
-
                             session.method == NanoHTTPD.Method.POST && session.uri == "/request" -> {
                                 val files = HashMap<String, String>()
                                 session.parseBody(files)
                                 val body = files["postData"] ?: ""
                                 val table = Regex("""[\"']table_id[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
                                 val request = Regex("""[\"']request[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1) ?: "WAITER"
-
                                 if (table.isNullOrBlank()) {
                                     newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
                                 } else {
@@ -83,7 +78,6 @@ object CrewBuzzNetwork {
                                     newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"ok\":true}")
                                 }
                             }
-
                             else -> newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, "text/plain", "Not found")
                         }
                     } catch (e: Exception) {
@@ -112,18 +106,12 @@ object CrewBuzzNetwork {
             started = false
             return
         }
-
         scope.launch { discoveryLoop() }
         scope.launch { broadcastDeviceDiscovery() }
-        scope.launch {
-            delay(700)
-            scanNow(context)
-        }
+        scope.launch { delay(700); scanNow(context) }
     }
 
-    fun scanNow() {
-        appContext?.let { scanNow(it) }
-    }
+    fun scanNow() { appContext?.let { scanNow(it) } }
 
     fun scanNow(context: Context) {
         if (!started) return
@@ -133,10 +121,7 @@ object CrewBuzzNetwork {
             val localIp = localIpv4(context, network)
             val prefix = localIp.substringBeforeLast('.', "")
             if (prefix.isBlank() || prefix == "0.0.0") return@launch
-
-            // The known working ESP is checked first, then the complete LAN is scanned.
             probeHttpDevice("$prefix.48", network)
-
             discoverySocket?.let { sendDiscoveryBroadcast(it) }
             scanLocalHttp(prefix, network)
         }
@@ -158,16 +143,13 @@ object CrewBuzzNetwork {
                     socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
                 }
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     private suspend fun scanLocalHttp(prefix: String, network: Network?) {
         val semaphore = Semaphore(32)
         val jobs = (1..254).map { host ->
-            scope.async {
-                semaphore.withPermit { probeHttpDevice("$prefix.$host", network) }
-            }
+            scope.async { semaphore.withPermit { probeHttpDevice("$prefix.$host", network) } }
         }
         jobs.awaitAll()
     }
@@ -176,33 +158,23 @@ object CrewBuzzNetwork {
         var connection: HttpURLConnection? = null
         try {
             val url = URL("http://$ip:$DEVICE_HTTP_PORT/crewbuzz")
-            connection = if (network != null) {
-                network.openConnection(url) as HttpURLConnection
-            } else {
-                url.openConnection() as HttpURLConnection
-            }
+            connection = if (network != null) network.openConnection(url) as HttpURLConnection else url.openConnection() as HttpURLConnection
             connection.connectTimeout = DEVICE_SCAN_TIMEOUT
             connection.readTimeout = DEVICE_SCAN_TIMEOUT
             connection.requestMethod = "GET"
             connection.useCaches = false
             connection.setRequestProperty("Connection", "close")
-
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return
             val body = connection.inputStream.bufferedReader().use { it.readText() }
-
             val type = jsonValue(body, "type")
             val table = jsonValue(body, "table_id")
             val device = jsonValue(body, "device_id")
-
             if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) {
                 val event = CrewBuzzDeviceEvent(table, device, ip)
                 _devices.value = _devices.value + (device to event)
-                configureEsp(event, connection.networkForRequest())
+                configureEsp(event, network ?: wifiNetwork)
             }
-        } catch (_: Exception) {
-        } finally {
-            connection?.disconnect()
-        }
+        } catch (_: Exception) {} finally { connection?.disconnect() }
     }
 
     private fun jsonValue(body: String, key: String): String? =
@@ -212,39 +184,27 @@ object CrewBuzzNetwork {
         val context = appContext ?: return
         val tabletIp = localIpv4(context, network ?: wifiNetwork)
         if (tabletIp == "0.0.0.0") return
-
         var connection: HttpURLConnection? = null
         try {
             val url = URL("http://${device.ip}:80/configure?ip=$tabletIp&port=$HTTP_PORT")
-            connection = if (network != null) {
-                network.openConnection(url) as HttpURLConnection
-            } else {
-                url.openConnection() as HttpURLConnection
-            }
+            connection = if (network != null) network.openConnection(url) as HttpURLConnection else url.openConnection() as HttpURLConnection
             connection.connectTimeout = 1500
             connection.readTimeout = 1500
             connection.requestMethod = "GET"
             connection.useCaches = false
-            connection.inputStream.close()
-        } catch (_: Exception) {
-        } finally {
-            connection?.disconnect()
-        }
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } catch (_: Exception) {} finally { connection?.disconnect() }
     }
-
-    private fun HttpURLConnection.networkForRequest(): Network? = wifiNetwork
 
     private fun discoveryLoop() {
         val socket = discoverySocket ?: return
         val buffer = ByteArray(512)
-
         try {
             while (started) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
                     val message = String(packet.data, 0, packet.length).trim()
-
                     if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
                         if (parts.size >= 4) {
@@ -253,11 +213,7 @@ object CrewBuzzNetwork {
                             scope.launch { configureEsp(event, wifiNetwork) }
                         }
                     }
-                } catch (_: java.net.SocketTimeoutException) {
-                } catch (_: java.net.SocketException) {
-                    break
-                } catch (_: Exception) {
-                }
+                } catch (_: java.net.SocketTimeoutException) {} catch (_: java.net.SocketException) { break } catch (_: Exception) {}
             }
         } finally {
             discoverySocket = null
@@ -271,9 +227,7 @@ object CrewBuzzNetwork {
             val active = cm.activeNetwork ?: return null
             val caps = cm.getNetworkCapabilities(active) ?: return null
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) active else null
-        } catch (_: Exception) {
-            null
-        }
+        } catch (_: Exception) { null }
     }
 
     private fun localIpv4(context: Context, network: Network?): String {
@@ -282,50 +236,26 @@ object CrewBuzzNetwork {
                 val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                 cm.getLinkProperties(network)?.linkAddresses?.forEach { link ->
                     val address = link.address
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
-                        return address.hostAddress ?: "0.0.0.0"
-                    }
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) return address.hostAddress ?: "0.0.0.0"
                 }
             }
-        } catch (_: Exception) {
-        }
-
-        return try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val networkInterface = interfaces.nextElement()
-                if (!networkInterface.isUp || networkInterface.isLoopback || networkInterface.isVirtual) continue
-                val addresses = networkInterface.inetAddresses
-                while (addresses.hasMoreElements()) {
-                    val address = addresses.nextElement()
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
-                        return address.hostAddress ?: "0.0.0.0"
-                    }
-                }
-            }
-            "0.0.0.0"
-        } catch (_: Exception) {
-            "0.0.0.0"
-        }
+        } catch (_: Exception) {}
+        return localIpv4()
     }
 
     private fun localIpv4(): String {
         return try {
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {
-                val networkInterface = interfaces.nextElement()
-                if (!networkInterface.isUp || networkInterface.isLoopback || networkInterface.isVirtual) continue
-                val addresses = networkInterface.inetAddresses
+                val ni = interfaces.nextElement()
+                if (!ni.isUp || ni.isLoopback || ni.isVirtual) continue
+                val addresses = ni.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
-                        return address.hostAddress ?: "0.0.0.0"
-                    }
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) return address.hostAddress ?: "0.0.0.0"
                 }
             }
             "0.0.0.0"
-        } catch (_: Exception) {
-            "0.0.0.0"
-        }
+        } catch (_: Exception) { "0.0.0.0" }
     }
 }

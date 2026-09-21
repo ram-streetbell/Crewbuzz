@@ -26,16 +26,29 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Build release APK
+      - name: Build unsigned release APK
         run: gradle :app:assembleRelease --no-daemon
 
-      - name: Locate and verify APK
+      - name: Sign release APK
         run: |
-          find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print
-          APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n 1)
-          test -n "$APK"
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
-          ls -lh "$APK"
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          APK_UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
+          KEYSTORE="$RUNNER_TEMP/crewbuzz-release.jks"
+          ALIGNED="app/build/outputs/apk/release/crewbuzz-aligned.apk"
+          SIGNED="app/build/outputs/apk/release/CrewBuzz.apk"
+
+          keytool -genkeypair -v             -keystore "$KEYSTORE"             -storepass "crewbuzz-test-key"             -keypass "crewbuzz-test-key"             -alias crewbuzz             -keyalg RSA             -keysize 2048             -validity 10000             -dname "CN=CrewBuzz, OU=CrewBuzz, O=CrewBuzz, L=Chennai, ST=Tamil Nadu, C=IN"
+
+          "$BUILD_TOOLS/zipalign" -f 4 "$APK_UNSIGNED" "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" sign             --ks "$KEYSTORE"             --ks-key-alias crewbuzz             --ks-pass pass:crewbuzz-test-key             --key-pass pass:crewbuzz-test-key             --out "$SIGNED"             "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+          ls -lh "$SIGNED"
+
+          echo "APK_PATH=$SIGNED" >> "$GITHUB_ENV"
 
       - name: Create release
         uses: softprops/action-gh-release@v2

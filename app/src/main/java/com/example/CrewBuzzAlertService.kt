@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Notification
+import android.content.Context
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -14,6 +15,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -30,6 +32,31 @@ class CrewBuzzAlertService : Service() {
 
         private const val CHANNEL_ID = "crewbuzz_alert_service"
         private const val NOTIFICATION_ID = 4101
+
+        fun startCall(context: Context, table: String) =
+            send(context, ACTION_START_CALL, table)
+
+        fun snooze(context: Context, table: String) =
+            send(context, ACTION_SNOOZE, table)
+
+        fun attend(context: Context, table: String) =
+            send(context, ACTION_ATTEND, table)
+
+        fun reset(context: Context) =
+            send(context, ACTION_RESET, null)
+
+        private fun send(context: Context, action: String, table: String?) {
+            val intent = Intent(context, CrewBuzzAlertService::class.java).apply {
+                this.action = action
+                if (table != null) putExtra(EXTRA_TABLE, table)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(context, intent)
+            } else {
+                context.startService(intent)
+            }
+        }
     }
 
     private val handler = Handler(Looper.getMainLooper())

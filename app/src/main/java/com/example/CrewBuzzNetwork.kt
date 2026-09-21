@@ -15,14 +15,17 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
-import java.net.URL
 import fi.iki.elonen.NanoHTTPD
 
 data class TableCallEvent(val tableId: String, val request: String)
@@ -75,13 +78,12 @@ object CrewBuzzNetwork {
                 }
             }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
 
-            val network = getLocalWifiNetwork(context)
-            wifiNetwork = network
+            wifiNetwork = getLocalWifiNetwork(context)
             discoverySocket = DatagramSocket(DISCOVERY_PORT).apply {
                 soTimeout = 1000
                 reuseAddress = true
                 broadcast = true
-                network?.let { it.bindSocket(this) }
+                wifiNetwork?.let { it.bindSocket(this) }
             }
         } catch (_: Exception) {
             httpServer?.stop()
@@ -111,6 +113,10 @@ object CrewBuzzNetwork {
             val localIp = localIpv4(context, network)
             val prefix = localIp.substringBeforeLast('.', "")
             if (prefix.isBlank()) return@launch
+
+            // Always test the currently known ESP first. This makes the scanner
+            // work even when the router blocks broadcast or UDP discovery.
+            probeHttpDevice("$prefix.48", network)
 
             val socket = discoverySocket
             if (socket != null && !socket.isClosed) {
@@ -169,29 +175,34 @@ object CrewBuzzNetwork {
     }
 
     private fun probeHttpDevice(ip: String, network: Network?) {
-        var connection: HttpURLConnection? = null
         try {
-            val url = URL("http://$ip:$DEVICE_HTTP_PORT/crewbuzz")
-            val opened = if (network != null) network.openConnection(url) else url.openConnection()
-            connection = opened as HttpURLConnection
-            connection.connectTimeout = 700
-            connection.readTimeout = 700
-            connection.requestMethod = "GET"
-            connection.useCaches = false
+            val socket: Socket = if (network != null) network.socketFactory.createSocket() else Socket()
+            socket.use { s ->
+                s.connect(InetSocketAddress(ip, DEVICE_HTTP_PORT), 500)
+                s.soTimeout = 700
 
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val body = connection.inputStream.bufferedReader().use { it.readText() }
-                // The ESP returns normal JSON. Keep the regex free of escaped quote characters.
-                val type = Regex("""["']type["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
-                val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
-                val device = Regex("""["']device_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
-                if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) {
-                    _devices.tryEmit(CrewBuzzDeviceEvent(table, device, ip))
+                OutputStreamWriter(s.getOutputStream(), Charsets.US_ASCII).use { writer ->
+                    writer.write("GET /crewbuzz HTTP/1.1\r\nHost: $ip\r\nConnection: close\r\n\r\n")
+                    writer.flush()
+
+                    val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
+                    var line: String?
+                    var statusOk = false
+                    while (reader.readLine().also { line = it } != null) {
+                        if (line!!.startsWith("HTTP/") && line!!.contains(" 200")) statusOk = true
+                        if (line!!.isEmpty()) break
+                    }
+                    if (!statusOk) return
+                    val body = reader.readText()
+                    val type = Regex("""["']type["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                    val table = Regex("""["']table_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                    val device = Regex("""["']device_id["']\s*:\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)
+                    if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) {
+                        _devices.tryEmit(CrewBuzzDeviceEvent(table, device, ip))
+                    }
                 }
             }
         } catch (_: Exception) {
-        } finally {
-            connection?.disconnect()
         }
     }
 

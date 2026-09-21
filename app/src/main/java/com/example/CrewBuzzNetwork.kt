@@ -12,9 +12,9 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketException
 import java.net.SocketTimeoutException
-import org.nanohttpd.protocols.http.IHTTPSession
+import fi.iki.elonen.IHTTPSession
 import org.nanohttpd.protocols.http.NanoHTTPD
-import org.nanohttpd.protocols.http.response.Response
+import fi.iki.elonen.NanoHTTPD.Response
 
 data class TableCallEvent(val tableId: String, val request: String)
 

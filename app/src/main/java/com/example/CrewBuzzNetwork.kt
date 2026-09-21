@@ -15,6 +15,7 @@ import java.net.SocketTimeoutException
 import fi.iki.elonen.NanoHTTPD
 
 data class TableCallEvent(val tableId: String, val request: String)
+data class CrewBuzzDeviceEvent(val tableId: String, val deviceId: String, val ip: String)
 
 object CrewBuzzNetwork {
     private const val HTTP_PORT = 8080
@@ -24,6 +25,8 @@ object CrewBuzzNetwork {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _tableCalls = MutableSharedFlow<TableCallEvent>(extraBufferCapacity = 32)
     val tableCalls = _tableCalls.asSharedFlow()
+    private val _devices = MutableSharedFlow<CrewBuzzDeviceEvent>(extraBufferCapacity = 32)
+    val devices = _devices.asSharedFlow()
 
     @Volatile private var started = false
     private var httpServer: NanoHTTPD? = null
@@ -84,9 +87,24 @@ object CrewBuzzNetwork {
         }
 
         scope.launch { discoveryLoop() }
+        scope.launch { broadcastDeviceDiscovery() }
     }
 
     private fun discoveryLoop() {
+    private suspend fun broadcastDeviceDiscovery() {
+        while (started) {
+            try {
+                DatagramSocket().use { socket ->
+                    socket.broadcast = true
+                    val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
+                    socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
+                }
+            } catch (_: Exception) {
+            }
+            delay(5000)
+        }
+    }
+
         DatagramSocket(DISCOVERY_PORT).use { socket ->
             socket.soTimeout = 1000
             socket.reuseAddress = true
@@ -109,6 +127,16 @@ object CrewBuzzNetwork {
                                 packet.port
                             )
                         )
+                    }
+                    if (message.startsWith("CREWBUZZ_DEVICE|")) {
+                        val parts = message.split("|")
+                        if (parts.size >= 4) {
+                            _devices.tryEmit(CrewBuzzDeviceEvent(parts[1], parts[2], parts[3]))
+                        }
+                    } else if (message == "CREWBUZZ_DEVICE_DISCOVER") {
+                        val response = "CREWBUZZ_TERMINAL|" + localIpv4() + "|" + HTTP_PORT + "|" + DEVICE_ID
+                        val bytes = response.toByteArray()
+                        socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
                     }
                 } catch (_: SocketTimeoutException) {
                 } catch (_: SocketException) {

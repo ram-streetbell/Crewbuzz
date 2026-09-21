@@ -1,6 +1,8 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -68,18 +70,13 @@ private fun CrewBuzzApp() {
     var page by remember { mutableIntStateOf(0) }
     var nextId by remember { mutableIntStateOf(10) }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+
     var state by remember {
         mutableStateOf(
             AppState(
-                calls = listOf(
-                    Call(1, "Table 1", "SERVICE", System.currentTimeMillis() - 120000),
-                    Call(2, "Table 3", "BILL", System.currentTimeMillis() - 340000),
-                    Call(3, "VIP B", "WATER", System.currentTimeMillis() - 40000)
-                ),
-                history = listOf(
-                    Call(4, "Table 2", "SERVICE", System.currentTimeMillis() - 1800000, System.currentTimeMillis() - 1650000, "Jack W."),
-                    Call(5, "Bar 1", "BILL", System.currentTimeMillis() - 3600000, System.currentTimeMillis() - 3400000, "Emily R.")
-                ),
+                calls = emptyList(),
+                history = emptyList(),
                 devices = listOf(
                     Device("DEV-001", "Table 1 Call Bell", "Table 1", true, 96),
                     Device("DEV-002", "Table 2 Call Bell", "Table 2", true, 88),
@@ -106,6 +103,7 @@ private fun CrewBuzzApp() {
                         System.currentTimeMillis()
                     )
                 )
+                CrewBuzzAlertService.startCall(context, event.tableId)
             }
         }
     }
@@ -163,7 +161,11 @@ private fun CrewBuzzApp() {
                                     state = state.copy(
                                         calls = state.calls + Call(nextId++, table, type, System.currentTimeMillis())
                                     )
+                                    CrewBuzzAlertService.startCall(context, table)
                                 }
+                            },
+                            onSnooze = { table ->
+                                CrewBuzzAlertService.snooze(context, table)
                             },
                             onAttend = { id ->
                                 val call = state.calls.firstOrNull { it.id == id }
@@ -177,6 +179,7 @@ private fun CrewBuzzApp() {
                                             )
                                         ) + state.history
                                     )
+                                    CrewBuzzAlertService.attend(context, call.table)
                                 }
                             }
                         )
@@ -209,7 +212,10 @@ private fun CrewBuzzApp() {
 
                         else -> Settings(
                             staff = staff,
-                            onReset = { state = state.copy(calls = emptyList()) },
+                            onReset = {
+                                state = state.copy(calls = emptyList())
+                                CrewBuzzAlertService.reset(context)
+                            },
                             onLogout = {
                                 loggedIn = false
                                 staff = ""
@@ -290,6 +296,7 @@ private fun LoginScreen(onLogin: (String) -> Unit) {
 private fun Dashboard(
     state: AppState,
     onCall: (String, String) -> Unit,
+    onSnooze: (String) -> Unit,
     onAttend: (Int) -> Unit
 ) {
     var tick by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -362,6 +369,12 @@ private fun Dashboard(
                                     fontSize = 11.sp
                                 )
                             }
+                            OutlinedButton(onClick = { onSnooze(call.table) }) {
+                                Icon(Icons.Default.Snooze, null, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("SNOOZE")
+                            }
+                            Spacer(Modifier.width(6.dp))
                             Button(onClick = { onAttend(call.id) }) {
                                 Icon(Icons.Default.Check, null, Modifier.size(14.dp))
                                 Spacer(Modifier.width(4.dp))

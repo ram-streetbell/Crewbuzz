@@ -21,6 +21,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 private val Red = Color(0xFFDC2626)
 private val Green = Color(0xFF16A34A)
@@ -54,6 +55,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        CrewBuzzNetwork.start(this)
         setContent { CrewBuzzApp() }
     }
 }
@@ -90,6 +92,22 @@ private fun CrewBuzzApp() {
                 )
             )
         )
+    }
+
+    LaunchedEffect(Unit) {
+        CrewBuzzNetwork.tableCalls.collectLatest { event ->
+            val exists = state.calls.any { it.table == event.tableId }
+            if (!exists) {
+                state = state.copy(
+                    calls = state.calls + Call(
+                        nextId++,
+                        event.tableId,
+                        event.request,
+                        System.currentTimeMillis()
+                    )
+                )
+            }
+        }
     }
 
     MaterialTheme(
@@ -517,6 +535,9 @@ private fun Settings(
                 Text("Receiver RF Channel     433.92 Mhz (CH5)")
                 Text("Firmware Build          v1.4.1-P1-NoDB")
                 Text("AP Link Mode            STANDALONE LOCAL", color = Green)
+                Text("Discovery               UDP AUTO-DISCOVERY")
+                Text("HTTP Receiver           8080")
+                Text("No fixed tablet IP required", color = Green, fontWeight = FontWeight.Bold)
             }
         }
 

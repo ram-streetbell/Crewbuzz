@@ -34,6 +34,7 @@ object CrewBuzzNetwork {
     private const val DISCOVERY_PORT = 4001
     private const val DEVICE_HTTP_PORT = 80
     private const val DEVICE_SCAN_TIMEOUT = 1200
+    private const val POLL_INTERVAL_MS = 1000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _tableCalls = MutableSharedFlow<TableCallEvent>(extraBufferCapacity = 64)
@@ -71,9 +72,8 @@ object CrewBuzzNetwork {
                                 val body = files["postData"] ?: ""
                                 val table = Regex("""[\"']table_id[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
                                 val request = Regex("""[\"']request[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1) ?: "WAITER"
-                                if (table.isNullOrBlank()) {
-                                    newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
-                                } else {
+                                if (table.isNullOrBlank()) newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
+                                else {
                                     _tableCalls.tryEmit(TableCallEvent(table, request))
                                     newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"ok\":true}")
                                 }
@@ -95,19 +95,15 @@ object CrewBuzzNetwork {
             }
             started = true
         } catch (_: Exception) {
-            httpServer?.stop()
-            httpServer = null
-            discoverySocket?.close()
-            discoverySocket = null
-            multicastLock?.release()
-            multicastLock = null
-            wifiNetwork = null
-            appContext = null
-            started = false
+            httpServer?.stop(); httpServer = null
+            discoverySocket?.close(); discoverySocket = null
+            multicastLock?.release(); multicastLock = null
+            wifiNetwork = null; appContext = null; started = false
             return
         }
         scope.launch { discoveryLoop() }
         scope.launch { broadcastDeviceDiscovery() }
+        scope.launch { pollDevicesLoop() }
         scope.launch { delay(700); scanNow(context) }
     }
 
@@ -134,6 +130,42 @@ object CrewBuzzNetwork {
         }
     }
 
+    private suspend fun pollDevicesLoop() {
+        while (started) {
+            val snapshot = _devices.value.values.toList()
+            snapshot.forEach { device -> pollDevice(device) }
+            delay(POLL_INTERVAL_MS)
+        }
+    }
+
+    private fun pollDevice(device: CrewBuzzDeviceEvent) {
+        val status = getDeviceText("http://${device.ip}:80/status") ?: return
+        val pending = Regex("""[\"']pending[\"']\s*:\s*true""").containsMatchIn(status)
+        if (!pending) return
+
+        _tableCalls.tryEmit(TableCallEvent(device.tableId, "WAITER"))
+        // Acknowledge immediately. The app has duplicate protection; if the UI is already
+        // showing this table, the poll is simply discarded on the next state pass.
+        getDeviceText("http://${device.ip}:80/ack")
+    }
+
+    private fun getDeviceText(urlText: String): String? {
+        var connection: HttpURLConnection? = null
+        try {
+            val url = URL(urlText)
+            val network = wifiNetwork
+            connection = if (network != null) network.openConnection(url) as HttpURLConnection else url.openConnection() as HttpURLConnection
+            connection.connectTimeout = 900
+            connection.readTimeout = 900
+            connection.requestMethod = "GET"
+            connection.useCaches = false
+            connection.setRequestProperty("Connection", "close")
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            return connection.inputStream.bufferedReader().use { it.readText() }
+        } catch (_: Exception) { return null }
+        finally { connection?.disconnect() }
+    }
+
     private fun sendDiscoveryBroadcast(socket: DatagramSocket) {
         try {
             val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
@@ -148,9 +180,7 @@ object CrewBuzzNetwork {
 
     private suspend fun scanLocalHttp(prefix: String, network: Network?) {
         val semaphore = Semaphore(32)
-        val jobs = (1..254).map { host ->
-            scope.async { semaphore.withPermit { probeHttpDevice("$prefix.$host", network) } }
-        }
+        val jobs = (1..254).map { host -> scope.async { semaphore.withPermit { probeHttpDevice("$prefix.$host", network) } } }
         jobs.awaitAll()
     }
 
@@ -215,10 +245,7 @@ object CrewBuzzNetwork {
                     }
                 } catch (_: java.net.SocketTimeoutException) {} catch (_: java.net.SocketException) { break } catch (_: Exception) {}
             }
-        } finally {
-            discoverySocket = null
-            try { socket.close() } catch (_: Exception) {}
-        }
+        } finally { discoverySocket = null; try { socket.close() } catch (_: Exception) {} }
     }
 
     private fun getLocalWifiNetwork(context: Context): Network? {

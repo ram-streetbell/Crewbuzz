@@ -43,11 +43,13 @@ object CrewBuzzNetwork {
     @Volatile private var started = false
     @Volatile private var discoverySocket: DatagramSocket? = null
     @Volatile private var wifiNetwork: Network? = null
+    @Volatile private var appContext: Context? = null
     private var httpServer: NanoHTTPD? = null
 
     fun start(context: Context) {
         if (started) return
         started = true
+        appContext = context.applicationContext
 
         try {
             httpServer = object : NanoHTTPD(HTTP_PORT) {
@@ -87,12 +89,19 @@ object CrewBuzzNetwork {
             discoverySocket?.close()
             discoverySocket = null
             wifiNetwork = null
+            appContext = null
             started = false
             return
         }
 
         scope.launch { discoveryLoop() }
         scope.launch { broadcastDeviceDiscovery() }
+    }
+
+    // Kept for the existing UI button: Devices page calls scanNow() with no argument.
+    fun scanNow() {
+        val context = appContext ?: return
+        scanNow(context)
     }
 
     fun scanNow(context: Context) {

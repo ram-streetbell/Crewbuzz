@@ -73,24 +73,33 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
+    fun scanNow() {
+        if (!started) return
+        scope.launch { sendDeviceDiscovery() }
+    }
+
     private suspend fun broadcastDeviceDiscovery() {
         while (started) {
-            try {
-                DatagramSocket().use { socket ->
-                    socket.broadcast = true
-                    val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
-                    socket.send(
-                        DatagramPacket(
-                            bytes,
-                            bytes.size,
-                            InetAddress.getByName("255.255.255.255"),
-                            DISCOVERY_PORT
-                        )
-                    )
-                }
-            } catch (_: Exception) {
-            }
+            sendDeviceDiscovery()
             delay(5000)
+        }
+    }
+
+    private fun sendDeviceDiscovery() {
+        try {
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
+                socket.send(
+                    DatagramPacket(
+                        bytes,
+                        bytes.size,
+                        InetAddress.getByName("255.255.255.255"),
+                        DISCOVERY_PORT
+                    )
+                )
+            }
+        } catch (_: Exception) {
         }
     }
 

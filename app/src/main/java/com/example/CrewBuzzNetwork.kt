@@ -98,7 +98,6 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
-    // Kept for the existing UI button: Devices page calls scanNow() with no argument.
     fun scanNow() {
         val context = appContext ?: return
         scanNow(context)
@@ -275,21 +274,23 @@ object CrewBuzzNetwork {
         }
     }
 
-    private fun localIpv4(): String = try {
-        val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-        while (interfaces.hasMoreElements()) {
-            val networkInterface = interfaces.nextElement()
-            if (!networkInterface.isUp || networkInterface.isLoopback || networkInterface.isVirtual) continue
-            val addresses = networkInterface.inetAddresses
-            while (addresses.hasMoreElements()) {
-                val address = addresses.nextElement()
-                if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
-                    return address.hostAddress ?: "0.0.0.0"
+    private fun localIpv4(): String {
+        return try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val networkInterface = interfaces.nextElement()
+                if (!networkInterface.isUp || networkInterface.isLoopback || networkInterface.isVirtual) continue
+                val addresses = networkInterface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
+                        return address.hostAddress ?: "0.0.0.0"
+                    }
                 }
             }
+            "0.0.0.0"
+        } catch (_: Exception) {
+            "0.0.0.0"
         }
-        "0.0.0.0"
-    } catch (_: Exception) {
-        "0.0.0.0"
     }
 }

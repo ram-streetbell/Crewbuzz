@@ -3,6 +3,8 @@
 
 const char* WIFI_SSID = "YOUR_WIFI_NAME";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* TABLE_ID = "TABLE_01";
+const char* DEVICE_ID = "ESP8266-01";
 
 #define TOUCH_PIN 4   // D2 / GPIO4
 #define LED_PIN   2   // D4 / GPIO2
@@ -10,6 +12,8 @@ const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 const unsigned int DISCOVERY_PORT = 4001;
 const unsigned long DISCOVERY_INTERVAL = 10000;
 const unsigned long DEBOUNCE_MS = 500;
+const unsigned long DEVICE_ANNOUNCE_INTERVAL = 5000;
+unsigned long lastDeviceAnnounce = 0;
 
 String crewbuzzIp = "";
 uint16_t crewbuzzPort = 8080;
@@ -19,6 +23,20 @@ bool lastTouchState = false;
 
 void setLed(bool on) {
   digitalWrite(LED_PIN, on ? LOW : HIGH);
+}
+
+bool announceDevice() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  WiFiUDP udp;
+  if (!udp.begin(0)) return false;
+
+  String message = String("CREWBUZZ_DEVICE|") + TABLE_ID + "|" + DEVICE_ID + "|" + WiFi.localIP().toString();
+  udp.beginPacket(IPAddress(255, 255, 255, 255), DISCOVERY_PORT);
+  udp.print(message);
+  udp.endPacket();
+  udp.stop();
+  return true;
 }
 
 bool discoverCrewBuzz() {
@@ -86,8 +104,7 @@ bool sendTableCall() {
     return sendTableCall();
   }
 
-  const String json =
-      "{\"type\":\"TABLE_CALL\",\"table_id\":\"TABLE_01\",\"request\":\"WAITER\"}";
+  String json = String("{\"type\":\"TABLE_CALL\",\"table_id\":\"") + TABLE_ID + "\",\"request\":\"WAITER\"}";
 
   client.println("POST /request HTTP/1.1");
   client.print("Host: ");
@@ -142,6 +159,7 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   setLed(true);
+  announceDevice();
   discoverCrewBuzz();
 }
 
@@ -153,6 +171,11 @@ void loop() {
   }
 
   setLed(true);
+
+  if (millis() - lastDeviceAnnounce >= DEVICE_ANNOUNCE_INTERVAL) {
+    lastDeviceAnnounce = millis();
+    announceDevice();
+  }
 
   if (millis() - lastDiscovery >= DISCOVERY_INTERVAL ||
       crewbuzzIp.length() == 0) {

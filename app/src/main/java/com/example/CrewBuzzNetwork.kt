@@ -30,6 +30,7 @@ object CrewBuzzNetwork {
     val devices = _devices.asSharedFlow()
 
     @Volatile private var started = false
+    @Volatile private var discoverySocket: DatagramSocket? = null
     private var httpServer: NanoHTTPD? = null
 
     fun start(context: Context) {
@@ -73,42 +74,63 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
+    // IMPORTANT: the scan request must originate from UDP 4001 because the ESP8266
+    // replies to the sender's source port. The old implementation used an ephemeral
+    // port, so the reply never reached discoveryLoop().
     fun scanNow() {
         if (!started) return
-        scope.launch { sendDeviceDiscovery() }
+        scope.launch {
+            repeat(3) {
+                sendDeviceDiscoveryFromListener()
+                delay(300)
+            }
+        }
     }
 
     private suspend fun broadcastDeviceDiscovery() {
         while (started) {
-            sendDeviceDiscovery()
+            sendDeviceDiscoveryFromListener()
             delay(5000)
         }
     }
 
-    private fun sendDeviceDiscovery() {
+    private fun sendDeviceDiscoveryFromListener() {
         try {
-            DatagramSocket().use { socket ->
-                socket.broadcast = true
-                val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
-                socket.send(
-                    DatagramPacket(
-                        bytes,
-                        bytes.size,
-                        InetAddress.getByName("255.255.255.255"),
-                        DISCOVERY_PORT
+            val socket = discoverySocket ?: return
+            val bytes = "CREWBUZZ_DEVICE_DISCOVER".toByteArray()
+            synchronized(socket) {
+                if (!socket.isClosed) {
+                    socket.broadcast = true
+                    socket.send(
+                        DatagramPacket(
+                            bytes,
+                            bytes.size,
+                            InetAddress.getByName("255.255.255.255"),
+                            DISCOVERY_PORT
+                        )
                     )
-                )
+                }
             }
         } catch (_: Exception) {
         }
     }
 
     private fun discoveryLoop() {
-        DatagramSocket(DISCOVERY_PORT).use { socket ->
-            socket.soTimeout = 1000
-            socket.reuseAddress = true
-            val buffer = ByteArray(512)
+        val socket = try {
+            DatagramSocket(DISCOVERY_PORT).apply {
+                soTimeout = 1000
+                reuseAddress = true
+                broadcast = true
+            }
+        } catch (_: Exception) {
+            started = false
+            return
+        }
 
+        discoverySocket = socket
+        val buffer = ByteArray(512)
+
+        try {
             while (started) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
@@ -118,7 +140,9 @@ object CrewBuzzNetwork {
                     if (message == "CREWBUZZ_DISCOVER") {
                         val response = "CREWBUZZ|" + localIpv4() + "|" + HTTP_PORT + "|" + DEVICE_ID
                         val bytes = response.toByteArray()
-                        socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
+                        synchronized(socket) {
+                            socket.send(DatagramPacket(bytes, bytes.size, packet.address, packet.port))
+                        }
                     } else if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
                         if (parts.size >= 4) {
@@ -131,6 +155,9 @@ object CrewBuzzNetwork {
                 } catch (_: Exception) {
                 }
             }
+        } finally {
+            discoverySocket = null
+            try { socket.close() } catch (_: Exception) {}
         }
     }
 

@@ -10,6 +10,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
@@ -66,8 +68,6 @@ object CrewBuzzNetwork {
                 }
             }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
 
-            // Bind once on UDP 4001. The same socket is used for sending and receiving,
-            // so ESP replies cannot be lost on a temporary/random source port.
             discoverySocket = DatagramSocket(DISCOVERY_PORT).apply {
                 soTimeout = 1000
                 reuseAddress = true
@@ -86,7 +86,6 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
     }
 
-    /** Manual scan: UDP broadcast + UDP unicast + direct HTTP subnet probe. */
     fun scanNow() {
         if (!started) return
         scope.launch {
@@ -96,13 +95,9 @@ object CrewBuzzNetwork {
             if (prefix.isBlank()) return@launch
 
             sendDiscoveryBroadcast(socket)
-
-            // Unicast discovery works on Wi-Fi networks that suppress broadcasts.
             (1..254).forEach { host ->
                 sendDiscoveryTo(socket, "$prefix.$host")
             }
-
-            // Direct HTTP fallback. The ESP exposes GET /crewbuzz on port 80.
             scanLocalHttp(prefix)
         }
     }

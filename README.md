@@ -59,3 +59,6 @@ gradle :app:assembleRelease
 ```
 
 GitHub Actions builds the release APK automatically on pushes to `main`.
+
+
+Release pipeline updated for installable CrewBuzz Terminal builds.

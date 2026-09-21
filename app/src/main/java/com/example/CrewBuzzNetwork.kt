@@ -136,13 +136,14 @@ object CrewBuzzNetwork {
 
     private suspend fun scanLocalHttp(prefix: String) {
         val semaphore = Semaphore(32)
-        (1..254).map { host ->
-            async {
+        val jobs = (1..254).map { host ->
+            scope.async {
                 semaphore.withPermit {
                     probeHttpDevice("$prefix.$host")
                 }
             }
-        }.awaitAll()
+        }
+        jobs.awaitAll()
     }
 
     private fun probeHttpDevice(ip: String) {

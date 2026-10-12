@@ -105,6 +105,10 @@ object CrewBuzzNetwork {
         scope.launch { broadcastDeviceDiscovery() }
         scope.launch { pollDevicesLoop() }
         scope.launch { delay(700); scanNow(context) }
+        // TEMP TEST FALLBACK: register the known ESP8266 while automatic discovery is debugged.
+        val testDevice = CrewBuzzDeviceEvent("TABLE_01", "ESP8266-01", "192.168.1.34")
+        _devices.value = _devices.value + (testDevice.deviceId to testDevice)
+        scope.launch { configureEsp(testDevice, wifiNetwork) }
     }
 
     fun scanNow() { appContext?.let { scanNow(it) } }

@@ -86,12 +86,18 @@ object CrewBuzzNetwork {
                 }
             }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
 
-            discoverySocket = DatagramSocket(null).apply {
-                reuseAddress = true
-                broadcast = true
-                bind(java.net.InetSocketAddress(DISCOVERY_PORT))
-                soTimeout = 800
-                wifiNetwork?.let { it.bindSocket(this) }
+            // UDP discovery is optional: it must not prevent direct-IP polling from starting.
+            try {
+                discoverySocket = DatagramSocket(null).apply {
+                    reuseAddress = true
+                    broadcast = true
+                    bind(java.net.InetSocketAddress(DISCOVERY_PORT))
+                    soTimeout = 800
+                    wifiNetwork?.let { it.bindSocket(this) }
+                }
+            } catch (_: Exception) {
+                discoverySocket?.close()
+                discoverySocket = null
             }
             started = true
         } catch (_: Exception) {
@@ -101,7 +107,7 @@ object CrewBuzzNetwork {
             wifiNetwork = null; appContext = null; started = false
             return
         }
-        scope.launch { discoveryLoop() }
+        if (discoverySocket != null) scope.launch { discoveryLoop() }
         scope.launch { broadcastDeviceDiscovery() }
         scope.launch { pollDevicesLoop() }
         scope.launch { delay(700); scanNow(context) }

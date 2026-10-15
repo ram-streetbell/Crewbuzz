@@ -33,14 +33,18 @@ object CrewBuzzNetwork {
     private const val HTTP_PORT = 8080
     private const val DISCOVERY_PORT = 4001
     private const val DEVICE_HTTP_PORT = 80
-    private const val DEVICE_SCAN_TIMEOUT = 1200
-    private const val POLL_INTERVAL_MS = 1000L
+    private const val DEVICE_SCAN_TIMEOUT = 900
+    private const val POLL_INTERVAL_MS = 700L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _tableCalls = MutableSharedFlow<TableCallEvent>(extraBufferCapacity = 64)
     val tableCalls = _tableCalls.asSharedFlow()
     private val _devices = MutableStateFlow<Map<String, CrewBuzzDeviceEvent>>(emptyMap())
     val devices = _devices.asStateFlow()
+
+    // Last request sequence delivered to the UI for each device.
+    // This prevents the same pending request from creating a new call every poll cycle.
+    private val lastDeliveredSequence = mutableMapOf<String, Long>()
 
     @Volatile private var started = false
     @Volatile private var discoverySocket: DatagramSocket? = null
@@ -66,18 +70,21 @@ object CrewBuzzNetwork {
                         when {
                             session.method == NanoHTTPD.Method.GET && session.uri == "/health" ->
                                 newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "text/plain", "CREWBUZZ_OK")
+
                             session.method == NanoHTTPD.Method.POST && session.uri == "/request" -> {
                                 val files = HashMap<String, String>()
                                 session.parseBody(files)
                                 val body = files["postData"] ?: ""
                                 val table = Regex("""[\"']table_id[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1)
                                 val request = Regex("""[\"']request[\"']\s*:\s*[\"']([^\"']+)[\"']""").find(body)?.groupValues?.get(1) ?: "WAITER"
-                                if (table.isNullOrBlank()) newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
-                                else {
+                                if (table.isNullOrBlank()) {
+                                    newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "Missing table_id")
+                                } else {
                                     _tableCalls.tryEmit(TableCallEvent(table, request))
                                     newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"ok\":true}")
                                 }
                             }
+
                             else -> newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, "text/plain", "Not found")
                         }
                     } catch (e: Exception) {
@@ -86,7 +93,7 @@ object CrewBuzzNetwork {
                 }
             }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
 
-            // UDP discovery is optional: it must not prevent direct-IP polling from starting.
+            // UDP discovery is optional. If it cannot bind, HTTP scanning still works.
             try {
                 discoverySocket = DatagramSocket(null).apply {
                     reuseAddress = true
@@ -99,25 +106,30 @@ object CrewBuzzNetwork {
                 discoverySocket?.close()
                 discoverySocket = null
             }
+
             started = true
         } catch (_: Exception) {
-            httpServer?.stop(); httpServer = null
-            discoverySocket?.close(); discoverySocket = null
-            multicastLock?.release(); multicastLock = null
-            wifiNetwork = null; appContext = null; started = false
+            httpServer?.stop()
+            httpServer = null
+            discoverySocket?.close()
+            discoverySocket = null
+            multicastLock?.release()
+            multicastLock = null
+            wifiNetwork = null
+            appContext = null
+            started = false
             return
         }
+
         if (discoverySocket != null) scope.launch { discoveryLoop() }
         scope.launch { broadcastDeviceDiscovery() }
         scope.launch { pollDevicesLoop() }
-        scope.launch { delay(700); scanNow(context) }
-        // TEMP TEST FALLBACK: register the known ESP8266 while automatic discovery is debugged.
-        val testDevice = CrewBuzzDeviceEvent("TABLE_01", "ESP8266-01", "192.168.1.34")
-        _devices.value = _devices.value + (testDevice.deviceId to testDevice)
-        scope.launch { configureEsp(testDevice, wifiNetwork) }
+        scope.launch { delay(500); scanNow(context) }
     }
 
-    fun scanNow() { appContext?.let { scanNow(it) } }
+    fun scanNow() {
+        appContext?.let { scanNow(it) }
+    }
 
     fun scanNow(context: Context) {
         if (!started) return
@@ -127,7 +139,9 @@ object CrewBuzzNetwork {
             val localIp = localIpv4(context, network)
             val prefix = localIp.substringBeforeLast('.', "")
             if (prefix.isBlank() || prefix == "0.0.0") return@launch
-            probeHttpDevice("$prefix.48", network)
+
+            // Fast direct probe for the previously used ESP address, then scan the subnet.
+            probeHttpDevice("$prefix.34", network)
             discoverySocket?.let { sendDiscoveryBroadcast(it) }
             scanLocalHttp(prefix, network)
         }
@@ -150,30 +164,60 @@ object CrewBuzzNetwork {
 
     private fun pollDevice(device: CrewBuzzDeviceEvent) {
         val status = getDeviceText("http://${device.ip}:80/status") ?: return
+
         val pending = Regex("""[\"']pending[\"']\s*:\s*true""").containsMatchIn(status)
-        if (!pending) return
+        if (!pending) {
+            // The device is no longer pending, so allow the next sequence to be delivered.
+            synchronized(lastDeliveredSequence) {
+                lastDeliveredSequence.remove(device.deviceId)
+            }
+            return
+        }
+
+        val sequence = Regex("""[\"']sequence[\"']\s*:\s*(\d+)""")
+            .find(status)?.groupValues?.get(1)?.toLongOrNull()
+            ?: Regex("""[\"']id[\"']\s*:\s*(\d+)""")
+                .find(status)?.groupValues?.get(1)?.toLongOrNull()
+            ?: 1L
+
+        val alreadyDelivered = synchronized(lastDeliveredSequence) {
+            lastDeliveredSequence[device.deviceId] == sequence
+        }
+        if (alreadyDelivered) return
+
+        synchronized(lastDeliveredSequence) {
+            lastDeliveredSequence[device.deviceId] = sequence
+        }
 
         _tableCalls.tryEmit(TableCallEvent(device.tableId, "WAITER"))
-        // Acknowledge immediately. The app has duplicate protection; if the UI is already
-        // showing this table, the poll is simply discarded on the next state pass.
+
+        // Tell the ESP that the app received the request. Without this, the same request
+        // would remain pending and be delivered again on the next poll.
         getDeviceText("http://${device.ip}:80/ack")
     }
 
     private fun getDeviceText(urlText: String): String? {
         var connection: HttpURLConnection? = null
-        try {
+        return try {
             val url = URL(urlText)
             val network = wifiNetwork
-            connection = if (network != null) network.openConnection(url) as HttpURLConnection else url.openConnection() as HttpURLConnection
+            connection = if (network != null) {
+                network.openConnection(url) as HttpURLConnection
+            } else {
+                url.openConnection() as HttpURLConnection
+            }
             connection.connectTimeout = 900
             connection.readTimeout = 900
             connection.requestMethod = "GET"
             connection.useCaches = false
             connection.setRequestProperty("Connection", "close")
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
-            return connection.inputStream.bufferedReader().use { it.readText() }
-        } catch (_: Exception) { return null }
-        finally { connection?.disconnect() }
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
     }
 
     private fun sendDiscoveryBroadcast(socket: DatagramSocket) {
@@ -182,7 +226,14 @@ object CrewBuzzNetwork {
             synchronized(socket) {
                 if (!socket.isClosed) {
                     socket.broadcast = true
-                    socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
+                    socket.send(
+                        DatagramPacket(
+                            bytes,
+                            bytes.size,
+                            InetAddress.getByName("255.255.255.255"),
+                            DISCOVERY_PORT
+                        )
+                    )
                 }
             }
         } catch (_: Exception) {}
@@ -190,7 +241,13 @@ object CrewBuzzNetwork {
 
     private suspend fun scanLocalHttp(prefix: String, network: Network?) {
         val semaphore = Semaphore(32)
-        val jobs = (1..254).map { host -> scope.async { semaphore.withPermit { probeHttpDevice("$prefix.$host", network) } } }
+        val jobs = (1..254).map { host ->
+            scope.async {
+                semaphore.withPermit {
+                    probeHttpDevice("$prefix.$host", network)
+                }
+            }
+        }
         jobs.awaitAll()
     }
 
@@ -198,53 +255,74 @@ object CrewBuzzNetwork {
         var connection: HttpURLConnection? = null
         try {
             val url = URL("http://$ip:$DEVICE_HTTP_PORT/crewbuzz")
-            connection = if (network != null) network.openConnection(url) as HttpURLConnection else url.openConnection() as HttpURLConnection
+            connection = if (network != null) {
+                network.openConnection(url) as HttpURLConnection
+            } else {
+                url.openConnection() as HttpURLConnection
+            }
             connection.connectTimeout = DEVICE_SCAN_TIMEOUT
             connection.readTimeout = DEVICE_SCAN_TIMEOUT
             connection.requestMethod = "GET"
             connection.useCaches = false
             connection.setRequestProperty("Connection", "close")
+
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return
+
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val type = jsonValue(body, "type")
             val table = jsonValue(body, "table_id")
             val device = jsonValue(body, "device_id")
+
             if (type == "CREWBUZZ_DEVICE" && !table.isNullOrBlank() && !device.isNullOrBlank()) {
                 val event = CrewBuzzDeviceEvent(table, device, ip)
                 _devices.value = _devices.value + (device to event)
                 configureEsp(event, network ?: wifiNetwork)
             }
-        } catch (_: Exception) {} finally { connection?.disconnect() }
+        } catch (_: Exception) {
+        } finally {
+            connection?.disconnect()
+        }
     }
 
     private fun jsonValue(body: String, key: String): String? =
-        Regex("""[\"']${Regex.escape(key)}[\"']\s*:\s*[\"']([^\"']*)[\"']""").find(body)?.groupValues?.get(1)
+        Regex("""[\"']${Regex.escape(key)}[\"']\s*:\s*[\"']([^\"']*)[\"']""")
+            .find(body)?.groupValues?.get(1)
 
     private fun configureEsp(device: CrewBuzzDeviceEvent, network: Network?) {
         val context = appContext ?: return
         val tabletIp = localIpv4(context, network ?: wifiNetwork)
         if (tabletIp == "0.0.0.0") return
+
         var connection: HttpURLConnection? = null
         try {
             val url = URL("http://${device.ip}:80/configure?ip=$tabletIp&port=$HTTP_PORT")
-            connection = if (network != null) network.openConnection(url) as HttpURLConnection else url.openConnection() as HttpURLConnection
+            connection = if (network != null) {
+                network.openConnection(url) as HttpURLConnection
+            } else {
+                url.openConnection() as HttpURLConnection
+            }
             connection.connectTimeout = 1500
             connection.readTimeout = 1500
             connection.requestMethod = "GET"
             connection.useCaches = false
             connection.inputStream.bufferedReader().use { it.readText() }
-        } catch (_: Exception) {} finally { connection?.disconnect() }
+        } catch (_: Exception) {
+        } finally {
+            connection?.disconnect()
+        }
     }
 
     private fun discoveryLoop() {
         val socket = discoverySocket ?: return
         val buffer = ByteArray(512)
+
         try {
             while (started) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
                     val message = String(packet.data, 0, packet.length).trim()
+
                     if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
                         if (parts.size >= 4) {
@@ -253,9 +331,16 @@ object CrewBuzzNetwork {
                             scope.launch { configureEsp(event, wifiNetwork) }
                         }
                     }
-                } catch (_: java.net.SocketTimeoutException) {} catch (_: java.net.SocketException) { break } catch (_: Exception) {}
+                } catch (_: java.net.SocketTimeoutException) {
+                } catch (_: java.net.SocketException) {
+                    break
+                } catch (_: Exception) {
+                }
             }
-        } finally { discoverySocket = null; try { socket.close() } catch (_: Exception) {} }
+        } finally {
+            discoverySocket = null
+            try { socket.close() } catch (_: Exception) {}
+        }
     }
 
     private fun getLocalWifiNetwork(context: Context): Network? {
@@ -263,8 +348,11 @@ object CrewBuzzNetwork {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val active = cm.activeNetwork ?: return null
             val caps = cm.getNetworkCapabilities(active) ?: return null
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) active else null
-        } catch (_: Exception) { null }
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) active else null
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun localIpv4(context: Context, network: Network?): String {
@@ -273,7 +361,9 @@ object CrewBuzzNetwork {
                 val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                 cm.getLinkProperties(network)?.linkAddresses?.forEach { link ->
                     val address = link.address
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) return address.hostAddress ?: "0.0.0.0"
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
+                        return address.hostAddress ?: "0.0.0.0"
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -289,10 +379,14 @@ object CrewBuzzNetwork {
                 val addresses = ni.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) return address.hostAddress ?: "0.0.0.0"
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
+                        return address.hostAddress ?: "0.0.0.0"
+                    }
                 }
             }
             "0.0.0.0"
-        } catch (_: Exception) { "0.0.0.0" }
+        } catch (_: Exception) {
+            "0.0.0.0"
+        }
     }
 }

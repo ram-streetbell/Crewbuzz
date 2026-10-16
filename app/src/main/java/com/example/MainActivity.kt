@@ -101,10 +101,9 @@ private fun CrewBuzzApp() {
                             }
                         }, { CrewBuzzAlertService.snooze(context, it) }, { id ->
                             calls.firstOrNull { it.id == id }?.let { call ->
-                                // ATTEND is the only action that acknowledges the ESP.
-                                CrewBuzzNetwork.attendTable(call.table)
                                 calls = calls.filterNot { it.id == id }
                                 history = listOf(call.copy(attended = System.currentTimeMillis(), staff = staff)) + history
+                                CrewBuzzNetwork.attendTable(call.table)
                                 CrewBuzzAlertService.attend(context, call.table)
                             }
                         })

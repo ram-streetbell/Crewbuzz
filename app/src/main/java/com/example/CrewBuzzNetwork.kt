@@ -20,9 +20,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.HttpURLConnection
 import java.net.URL
 import fi.iki.elonen.NanoHTTPD
 
@@ -43,7 +43,6 @@ object CrewBuzzNetwork {
     val devices = _devices.asStateFlow()
 
     // Last request sequence delivered to the UI for each device.
-    // This prevents the same pending request from creating a new call every poll cycle.
     private val lastDeliveredSequence = mutableMapOf<String, Long>()
 
     @Volatile private var started = false
@@ -93,7 +92,6 @@ object CrewBuzzNetwork {
                 }
             }.also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }
 
-            // UDP discovery is optional. If it cannot bind, HTTP scanning still works.
             try {
                 discoverySocket = DatagramSocket(null).apply {
                     reuseAddress = true
@@ -140,10 +138,20 @@ object CrewBuzzNetwork {
             val prefix = localIp.substringBeforeLast('.', "")
             if (prefix.isBlank() || prefix == "0.0.0") return@launch
 
-            // Fast direct probe for the previously used ESP address, then scan the subnet.
             probeHttpDevice("$prefix.34", network)
             discoverySocket?.let { sendDiscoveryBroadcast(it) }
             scanLocalHttp(prefix, network)
+        }
+    }
+
+    /** Called only when the user presses ATTEND. */
+    fun attendTable(tableId: String) {
+        scope.launch {
+            val device = _devices.value.values.firstOrNull { it.tableId == tableId } ?: return@launch
+            getDeviceText("http://${device.ip}:80/ack")
+            synchronized(lastDeliveredSequence) {
+                lastDeliveredSequence.remove(device.deviceId)
+            }
         }
     }
 
@@ -157,17 +165,17 @@ object CrewBuzzNetwork {
     private suspend fun pollDevicesLoop() {
         while (started) {
             val snapshot = _devices.value.values.toList()
-            snapshot.forEach { device -> pollDevice(device) }
+            snapshot.forEach { device -> pollDevice(it = device) }
             delay(POLL_INTERVAL_MS)
         }
     }
 
-    private fun pollDevice(device: CrewBuzzDeviceEvent) {
+    private fun pollDevice(it: CrewBuzzDeviceEvent) {
+        val device = it
         val status = getDeviceText("http://${device.ip}:80/status") ?: return
 
         val pending = Regex("""[\"']pending[\"']\s*:\s*true""").containsMatchIn(status)
         if (!pending) {
-            // The device is no longer pending, so allow the next sequence to be delivered.
             synchronized(lastDeliveredSequence) {
                 lastDeliveredSequence.remove(device.deviceId)
             }
@@ -189,11 +197,9 @@ object CrewBuzzNetwork {
             lastDeliveredSequence[device.deviceId] = sequence
         }
 
+        // IMPORTANT: do NOT ACK here. The ESP must remain pending, and its LEDs must
+        // remain ON, until the staff member presses ATTEND in the Android app.
         _tableCalls.tryEmit(TableCallEvent(device.tableId, "WAITER"))
-
-        // Tell the ESP that the app received the request. Without this, the same request
-        // would remain pending and be delivered again on the next poll.
-        getDeviceText("http://${device.ip}:80/ack")
     }
 
     private fun getDeviceText(urlText: String): String? {
@@ -201,11 +207,8 @@ object CrewBuzzNetwork {
         return try {
             val url = URL(urlText)
             val network = wifiNetwork
-            connection = if (network != null) {
-                network.openConnection(url) as HttpURLConnection
-            } else {
-                url.openConnection() as HttpURLConnection
-            }
+            connection = if (network != null) network.openConnection(url) as HttpURLConnection
+            else url.openConnection() as HttpURLConnection
             connection.connectTimeout = 900
             connection.readTimeout = 900
             connection.requestMethod = "GET"
@@ -226,14 +229,7 @@ object CrewBuzzNetwork {
             synchronized(socket) {
                 if (!socket.isClosed) {
                     socket.broadcast = true
-                    socket.send(
-                        DatagramPacket(
-                            bytes,
-                            bytes.size,
-                            InetAddress.getByName("255.255.255.255"),
-                            DISCOVERY_PORT
-                        )
-                    )
+                    socket.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
                 }
             }
         } catch (_: Exception) {}
@@ -242,11 +238,7 @@ object CrewBuzzNetwork {
     private suspend fun scanLocalHttp(prefix: String, network: Network?) {
         val semaphore = Semaphore(32)
         val jobs = (1..254).map { host ->
-            scope.async {
-                semaphore.withPermit {
-                    probeHttpDevice("$prefix.$host", network)
-                }
-            }
+            scope.async { semaphore.withPermit { probeHttpDevice("$prefix.$host", network) } }
         }
         jobs.awaitAll()
     }
@@ -255,17 +247,13 @@ object CrewBuzzNetwork {
         var connection: HttpURLConnection? = null
         try {
             val url = URL("http://$ip:$DEVICE_HTTP_PORT/crewbuzz")
-            connection = if (network != null) {
-                network.openConnection(url) as HttpURLConnection
-            } else {
-                url.openConnection() as HttpURLConnection
-            }
+            connection = if (network != null) network.openConnection(url) as HttpURLConnection
+            else url.openConnection() as HttpURLConnection
             connection.connectTimeout = DEVICE_SCAN_TIMEOUT
             connection.readTimeout = DEVICE_SCAN_TIMEOUT
             connection.requestMethod = "GET"
             connection.useCaches = false
             connection.setRequestProperty("Connection", "close")
-
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return
 
             val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -285,8 +273,7 @@ object CrewBuzzNetwork {
     }
 
     private fun jsonValue(body: String, key: String): String? =
-        Regex("""[\"']${Regex.escape(key)}[\"']\s*:\s*[\"']([^\"']*)[\"']""")
-            .find(body)?.groupValues?.get(1)
+        Regex("""[\"']${Regex.escape(key)}[\"']\s*:\s*[\"']([^\"']*)[\"']""").find(body)?.groupValues?.get(1)
 
     private fun configureEsp(device: CrewBuzzDeviceEvent, network: Network?) {
         val context = appContext ?: return
@@ -296,11 +283,8 @@ object CrewBuzzNetwork {
         var connection: HttpURLConnection? = null
         try {
             val url = URL("http://${device.ip}:80/configure?ip=$tabletIp&port=$HTTP_PORT")
-            connection = if (network != null) {
-                network.openConnection(url) as HttpURLConnection
-            } else {
-                url.openConnection() as HttpURLConnection
-            }
+            connection = if (network != null) network.openConnection(url) as HttpURLConnection
+            else url.openConnection() as HttpURLConnection
             connection.connectTimeout = 1500
             connection.readTimeout = 1500
             connection.requestMethod = "GET"
@@ -315,14 +299,12 @@ object CrewBuzzNetwork {
     private fun discoveryLoop() {
         val socket = discoverySocket ?: return
         val buffer = ByteArray(512)
-
         try {
             while (started) {
                 try {
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket.receive(packet)
                     val message = String(packet.data, 0, packet.length).trim()
-
                     if (message.startsWith("CREWBUZZ_DEVICE|")) {
                         val parts = message.split("|")
                         if (parts.size >= 4) {
@@ -348,11 +330,8 @@ object CrewBuzzNetwork {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val active = cm.activeNetwork ?: return null
             val caps = cm.getNetworkCapabilities(active) ?: return null
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) active else null
-        } catch (_: Exception) {
-            null
-        }
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) active else null
+        } catch (_: Exception) { null }
     }
 
     private fun localIpv4(context: Context, network: Network?): String {
@@ -361,9 +340,7 @@ object CrewBuzzNetwork {
                 val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                 cm.getLinkProperties(network)?.linkAddresses?.forEach { link ->
                     val address = link.address
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
-                        return address.hostAddress ?: "0.0.0.0"
-                    }
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) return address.hostAddress ?: "0.0.0.0"
                 }
             }
         } catch (_: Exception) {}
@@ -379,14 +356,10 @@ object CrewBuzzNetwork {
                 val addresses = ni.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
-                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) {
-                        return address.hostAddress ?: "0.0.0.0"
-                    }
+                    if (address is Inet4Address && !address.isLoopbackAddress && address.isSiteLocalAddress) return address.hostAddress ?: "0.0.0.0"
                 }
             }
             "0.0.0.0"
-        } catch (_: Exception) {
-            "0.0.0.0"
-        }
+        } catch (_: Exception) { "0.0.0.0" }
     }
 }
